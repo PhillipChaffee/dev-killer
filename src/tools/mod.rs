@@ -1,8 +1,12 @@
 mod file;
 mod registry;
+mod search;
+mod shell;
 
 pub use file::{EditFileTool, ReadFileTool, WriteFileTool};
 pub use registry::ToolRegistry;
+pub use search::{GlobTool, GrepTool};
+pub use shell::ShellTool;
 
 use anyhow::Result;
 use async_trait::async_trait;

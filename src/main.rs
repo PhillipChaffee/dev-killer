@@ -4,8 +4,8 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use dev_killer::{
-    AnthropicProvider, CoderAgent, EditFileTool, Executor, LlmProvider, OpenAIProvider,
-    ReadFileTool, ToolRegistry, WriteFileTool,
+    AnthropicProvider, CoderAgent, EditFileTool, Executor, GlobTool, GrepTool, LlmProvider,
+    OpenAIProvider, ReadFileTool, ShellTool, ToolRegistry, WriteFileTool,
 };
 
 #[derive(Parser)]
@@ -71,9 +71,15 @@ fn create_provider(provider: &str, model: Option<&str>) -> Result<Box<dyn LlmPro
 
 fn create_tool_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
+    // File tools
     registry.register(ReadFileTool);
     registry.register(WriteFileTool);
     registry.register(EditFileTool);
+    // Shell tool
+    registry.register(ShellTool);
+    // Search tools
+    registry.register(GlobTool);
+    registry.register(GrepTool);
     registry
 }
 

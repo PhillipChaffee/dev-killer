@@ -13,4 +13,6 @@ pub use llm::{
 };
 pub use runtime::Executor;
 pub use session::{SessionState, Storage};
-pub use tools::{EditFileTool, ReadFileTool, Tool, ToolRegistry, WriteFileTool};
+pub use tools::{
+    EditFileTool, GlobTool, GrepTool, ReadFileTool, ShellTool, Tool, ToolRegistry, WriteFileTool,
+};

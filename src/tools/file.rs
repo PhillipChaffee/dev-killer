@@ -40,7 +40,12 @@ fn validate_path(path: &str) -> Result<PathBuf> {
     let path_str = canonical.to_string_lossy();
 
     // Check for sensitive system directories
-    if path_str.starts_with("/etc/") || path_str == "/etc" {
+    // Note: On macOS, /etc is a symlink to /private/etc
+    if path_str.starts_with("/etc/")
+        || path_str == "/etc"
+        || path_str.starts_with("/private/etc/")
+        || path_str == "/private/etc"
+    {
         anyhow::bail!("access to /etc is not allowed");
     }
 

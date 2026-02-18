@@ -91,20 +91,50 @@ impl LlmProvider for AnthropicProvider {
                         message_type: MessageType::Text,
                         content: msg.content.clone(),
                     }),
-                    MessageRole::Assistant => Some(ChatMessage {
-                        role: ChatRole::Assistant,
-                        message_type: MessageType::Text,
-                        content: msg.content.clone(),
-                    }),
+                    MessageRole::Assistant => {
+                        // Include tool calls if present
+                        if msg.tool_calls.is_empty() {
+                            Some(ChatMessage {
+                                role: ChatRole::Assistant,
+                                message_type: MessageType::Text,
+                                content: msg.content.clone(),
+                            })
+                        } else {
+                            let tool_calls: Vec<llm::ToolCall> = msg
+                                .tool_calls
+                                .iter()
+                                .map(|tc| llm::ToolCall {
+                                    id: tc.id.clone(),
+                                    call_type: "function".to_string(),
+                                    function: llm::FunctionCall {
+                                        name: tc.name.clone(),
+                                        arguments: tc.arguments.to_string(),
+                                    },
+                                })
+                                .collect();
+                            Some(ChatMessage {
+                                role: ChatRole::Assistant,
+                                message_type: MessageType::ToolUse(tool_calls),
+                                content: msg.content.clone(),
+                            })
+                        }
+                    }
                     MessageRole::Tool => {
-                        // Tool results are sent as user messages with the result content
-                        msg.tool_result.as_ref().map(|result| ChatMessage {
-                            role: ChatRole::User,
-                            message_type: MessageType::Text,
-                            content: format!(
-                                "Tool result for {}: {}",
-                                result.tool_call_id, result.result
-                            ),
+                        // Tool results are sent using the ToolResult message type
+                        msg.tool_result.as_ref().map(|result| {
+                            let tool_call = llm::ToolCall {
+                                id: result.tool_call_id.clone(),
+                                call_type: "function".to_string(),
+                                function: llm::FunctionCall {
+                                    name: String::new(), // Not needed for results
+                                    arguments: result.result.clone(),
+                                },
+                            };
+                            ChatMessage {
+                                role: ChatRole::User,
+                                message_type: MessageType::ToolResult(vec![tool_call]),
+                                content: String::new(),
+                            }
                         })
                     }
                     MessageRole::System => None, // System messages handled separately
@@ -143,8 +173,12 @@ impl LlmProvider for AnthropicProvider {
                     .map(|tc| ToolCall {
                         id: tc.id.clone(),
                         name: tc.function.name.clone(),
-                        arguments: serde_json::from_str(&tc.function.arguments)
-                            .unwrap_or(serde_json::Value::Null),
+                        arguments: serde_json::from_str(&tc.function.arguments).unwrap_or_else(
+                            |e| {
+                                warn!(error = %e, "failed to parse tool call arguments as JSON");
+                                serde_json::Value::Null
+                            },
+                        ),
                     })
                     .collect()
             })
@@ -240,20 +274,50 @@ impl LlmProvider for OpenAIProvider {
                         message_type: MessageType::Text,
                         content: msg.content.clone(),
                     }),
-                    MessageRole::Assistant => Some(ChatMessage {
-                        role: ChatRole::Assistant,
-                        message_type: MessageType::Text,
-                        content: msg.content.clone(),
-                    }),
+                    MessageRole::Assistant => {
+                        // Include tool calls if present
+                        if msg.tool_calls.is_empty() {
+                            Some(ChatMessage {
+                                role: ChatRole::Assistant,
+                                message_type: MessageType::Text,
+                                content: msg.content.clone(),
+                            })
+                        } else {
+                            let tool_calls: Vec<llm::ToolCall> = msg
+                                .tool_calls
+                                .iter()
+                                .map(|tc| llm::ToolCall {
+                                    id: tc.id.clone(),
+                                    call_type: "function".to_string(),
+                                    function: llm::FunctionCall {
+                                        name: tc.name.clone(),
+                                        arguments: tc.arguments.to_string(),
+                                    },
+                                })
+                                .collect();
+                            Some(ChatMessage {
+                                role: ChatRole::Assistant,
+                                message_type: MessageType::ToolUse(tool_calls),
+                                content: msg.content.clone(),
+                            })
+                        }
+                    }
                     MessageRole::Tool => {
-                        // Tool results are sent as user messages with the result content
-                        msg.tool_result.as_ref().map(|result| ChatMessage {
-                            role: ChatRole::User,
-                            message_type: MessageType::Text,
-                            content: format!(
-                                "Tool result for {}: {}",
-                                result.tool_call_id, result.result
-                            ),
+                        // Tool results are sent using the ToolResult message type
+                        msg.tool_result.as_ref().map(|result| {
+                            let tool_call = llm::ToolCall {
+                                id: result.tool_call_id.clone(),
+                                call_type: "function".to_string(),
+                                function: llm::FunctionCall {
+                                    name: String::new(), // Not needed for results
+                                    arguments: result.result.clone(),
+                                },
+                            };
+                            ChatMessage {
+                                role: ChatRole::User,
+                                message_type: MessageType::ToolResult(vec![tool_call]),
+                                content: String::new(),
+                            }
                         })
                     }
                     MessageRole::System => None, // System messages handled separately
@@ -292,8 +356,12 @@ impl LlmProvider for OpenAIProvider {
                     .map(|tc| ToolCall {
                         id: tc.id.clone(),
                         name: tc.function.name.clone(),
-                        arguments: serde_json::from_str(&tc.function.arguments)
-                            .unwrap_or(serde_json::Value::Null),
+                        arguments: serde_json::from_str(&tc.function.arguments).unwrap_or_else(
+                            |e| {
+                                warn!(error = %e, "failed to parse tool call arguments as JSON");
+                                serde_json::Value::Null
+                            },
+                        ),
                     })
                     .collect()
             })
