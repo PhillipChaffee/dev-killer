@@ -5,7 +5,7 @@ use tracing_subscriber::EnvFilter;
 
 use dev_killer::{
     AnthropicProvider, CoderAgent, EditFileTool, Executor, GlobTool, GrepTool, LlmProvider,
-    OpenAIProvider, ReadFileTool, ShellTool, ToolRegistry, WriteFileTool,
+    OpenAIProvider, OrchestratorAgent, ReadFileTool, ShellTool, ToolRegistry, WriteFileTool,
 };
 
 #[derive(Parser)]
@@ -34,6 +34,10 @@ enum Commands {
     Run {
         /// The task to perform
         task: String,
+
+        /// Use simple mode (single coder agent) instead of full orchestration
+        #[arg(long)]
+        simple: bool,
     },
 }
 
@@ -89,19 +93,28 @@ async fn main() -> Result<()> {
     init_logging(cli.verbose);
 
     match cli.command {
-        Commands::Run { task } => {
-            info!(provider = %cli.provider, "starting task");
+        Commands::Run { task, simple } => {
+            info!(provider = %cli.provider, simple, "starting task");
 
             let provider = create_provider(&cli.provider, cli.model.as_deref())
                 .context("failed to create LLM provider")?;
 
             let tools = create_tool_registry();
             let executor = Executor::new(tools);
-            let agent = CoderAgent::new();
 
-            match executor.run(&agent, &task, provider.as_ref()).await {
-                Ok(result) => {
-                    println!("\n{}", result);
+            let result = if simple {
+                info!("using simple mode (single coder agent)");
+                let agent = CoderAgent::new();
+                executor.run(&agent, &task, provider.as_ref()).await
+            } else {
+                info!("using orchestrator mode (planner -> coder -> tester -> reviewer)");
+                let agent = OrchestratorAgent::new();
+                executor.run(&agent, &task, provider.as_ref()).await
+            };
+
+            match result {
+                Ok(output) => {
+                    println!("\n{}", output);
                 }
                 Err(e) => {
                     error!(error = %e, "task failed");
