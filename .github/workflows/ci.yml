@@ -17,6 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
@@ -34,6 +37,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show
 
       - uses: Swatinem/rust-cache@v2
 
