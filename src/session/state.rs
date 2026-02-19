@@ -88,7 +88,7 @@ impl SessionState {
     pub fn can_resume(&self) -> bool {
         matches!(
             self.status,
-            SessionStatus::Pending | SessionStatus::InProgress
+            SessionStatus::Pending | SessionStatus::InProgress | SessionStatus::Interrupted
         )
     }
 }

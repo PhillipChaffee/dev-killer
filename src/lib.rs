@@ -11,8 +11,8 @@ pub use agents::{
 };
 pub use config::{Policy, ProjectConfig};
 pub use llm::{
-    AnthropicProvider, LlmProvider, LlmResponse, Message, MessageRole, OpenAIProvider, ToolCall,
-    ToolResult,
+    AnthropicProvider, LlmProvider, LlmResponse, Message, MessageRole, OpenAIProvider, RetryConfig,
+    ToolCall, ToolResult, is_retryable_error, retry_with_backoff,
 };
 pub use runtime::Executor;
 pub use session::{

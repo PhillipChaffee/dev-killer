@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 use dev_killer::{
     AnthropicProvider, CoderAgent, EditFileTool, Executor, GlobTool, GrepTool, LlmProvider,
-    OpenAIProvider, OrchestratorAgent, ReadFileTool, SessionState, ShellTool, SqliteStorage,
-    Storage, ToolRegistry, WriteFileTool,
+    OpenAIProvider, OrchestratorAgent, ProjectConfig, ReadFileTool, SessionState, ShellTool,
+    SqliteStorage, Storage, ToolRegistry, WriteFileTool,
 };
 
 #[derive(Parser)]
@@ -120,20 +120,32 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
 
+    // Load configuration with precedence: CLI > env > project > global > defaults
+    let config = ProjectConfig::load().unwrap_or_else(|e| {
+        debug!(error = %e, "failed to load config, using defaults");
+        ProjectConfig::default()
+    });
+
     match cli.command {
         Commands::Run {
             task,
             simple,
             save_session,
         } => {
-            info!(provider = %cli.provider, simple, save_session, "starting task");
+            // Apply config defaults - CLI flags override config
+            let use_simple = simple || config.simple_mode;
+            let use_save_session = save_session || config.save_sessions;
+            let provider_name = config.provider.as_deref().unwrap_or(&cli.provider);
+            let model_name = cli.model.as_deref().or(config.model.as_deref());
 
-            let provider = create_provider(&cli.provider, cli.model.as_deref())
+            info!(provider = %provider_name, simple = use_simple, save_session = use_save_session, "starting task");
+
+            let provider = create_provider(provider_name, model_name)
                 .context("failed to create LLM provider")?;
 
             let tools = create_tool_registry();
 
-            let result = if save_session {
+            let result = if use_save_session {
                 // Run with session tracking
                 let storage = SqliteStorage::default_location()
                     .context("failed to initialize session storage")?;
@@ -147,7 +159,7 @@ async fn main() -> Result<()> {
                 let mut session = SessionState::new(&task, working_dir);
                 info!(session_id = %session.id, "created new session");
 
-                if simple {
+                if use_simple {
                     info!("using simple mode (single coder agent)");
                     let agent = CoderAgent::new();
                     executor
@@ -164,7 +176,7 @@ async fn main() -> Result<()> {
                 // Run without session tracking
                 let executor = Executor::new(tools);
 
-                if simple {
+                if use_simple {
                     info!("using simple mode (single coder agent)");
                     let agent = CoderAgent::new();
                     executor.run(&agent, &task, provider.as_ref()).await
@@ -187,9 +199,14 @@ async fn main() -> Result<()> {
         }
 
         Commands::Resume { session_id, simple } => {
+            // Apply config defaults - CLI flags override config
+            let use_simple = simple || config.simple_mode;
+            let provider_name = config.provider.as_deref().unwrap_or(&cli.provider);
+            let model_name = cli.model.as_deref().or(config.model.as_deref());
+
             info!(session_id = %session_id, "resuming session");
 
-            let provider = create_provider(&cli.provider, cli.model.as_deref())
+            let provider = create_provider(provider_name, model_name)
                 .context("failed to create LLM provider")?;
 
             let tools = create_tool_registry();
@@ -197,7 +214,7 @@ async fn main() -> Result<()> {
                 .context("failed to initialize session storage")?;
             let executor = Executor::with_storage(tools, Box::new(storage));
 
-            let result = if simple {
+            let result = if use_simple {
                 let agent = CoderAgent::new();
                 executor
                     .resume_session(&session_id, &agent, provider.as_ref())
