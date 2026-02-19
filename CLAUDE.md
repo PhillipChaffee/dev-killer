@@ -214,6 +214,104 @@ All require a `cargo build` first. Tests marked with (API key) require `ANTHROPI
    cargo run -- -v run --simple "respond with only the word HELLO"
    ```
 
+### Phase 6: Builder API & Library Entry Point
+
+These test that `DevKiller::builder()` wires up correctly through the CLI.
+
+1. Builder with default tools and simple mode (API key):
+   ```bash
+   cargo run -- run --simple "respond with only the word PONG"
+   ```
+   Expected: output contains "PONG". Validates builder → provider → tools → agent pipeline.
+
+2. Builder with save-session enables storage (API key):
+   ```bash
+   cargo run -- run --save-session --simple "respond with only the word SAVED"
+   cargo run -- sessions --status completed
+   ```
+   Expected: session appears in list. Validates builder's `sqlite_storage()` path.
+
+3. Builder without provider fails gracefully:
+   ```bash
+   ANTHROPIC_API_KEY="" OPENAI_API_KEY="" cargo run -- --provider openai run --simple "hello" 2>&1 || true
+   ```
+   Expected: error message about provider/API key, not a panic.
+
+### Phase 7: Event System & Streaming
+
+1. Verbose mode shows agent lifecycle events (API key):
+   ```bash
+   cargo run -- -v run --simple "respond with only the word HELLO" 2>&1 | grep -E "(starting|completed|iteration)"
+   ```
+   Expected: log lines showing agent start, iteration, and completion events.
+
+2. Full pipeline emits phase change events (API key):
+   ```bash
+   cargo run -- -v run "respond with only the word HELLO" 2>&1 | grep -i "phase\|step"
+   ```
+   Expected: log lines showing pipeline step transitions.
+
+### Phase 8: Tool Approval
+
+Tool approval is a library-only feature (consumers wire up approval via `ApprovalMode`). These verify the default auto-approve behavior works and that the approval infrastructure doesn't break normal execution.
+
+1. Auto-approve mode executes tools without blocking (API key):
+   ```bash
+   cargo run -- run --simple "use the shell tool to run 'echo approval-test' and tell me the output"
+   ```
+   Expected: output contains "approval-test". Tools execute without hanging.
+
+2. Multiple tool calls in sequence auto-approve (API key):
+   ```bash
+   cargo run -- run --simple "write 'test1' to /tmp/dk-approval-test.txt, then read it back, then delete it with the shell tool"
+   ```
+   Expected: completes without hanging. Validates approval doesn't block sequential tool calls.
+
+### Phase 9: Customizable Pipeline
+
+1. Simple mode uses single-step pipeline (API key):
+   ```bash
+   cargo run -- -v run --simple "respond with only the word PIPELINE" 2>&1
+   ```
+   Expected: only one agent step runs (coder), no planner/tester/reviewer steps.
+
+2. Full mode uses multi-step pipeline (API key):
+   ```bash
+   cargo run -- -v run "respond with only the word PIPELINE" 2>&1
+   ```
+   Expected: multiple pipeline steps execute (plan, code, test, review visible in logs).
+
+### Phase 10: Session Export & Import
+
+1. Export a session to JSON (API key):
+   ```bash
+   SESSION_ID=$(cargo run -- run --save-session --simple "respond with only the word EXPORT" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep "created new session" | sed 's/.*session_id=//')
+   cargo run -- export-session "$SESSION_ID" --output /tmp/dk-export-test.json
+   python3 -c "import json; d=json.load(open('/tmp/dk-export-test.json')); print(d['task'])"
+   ```
+   Expected: JSON file created, `task` field contains the task text. Note: the `sed` strips ANSI escape codes from tracing output.
+
+2. Import a session from JSON:
+   ```bash
+   cargo run -- import-session /tmp/dk-export-test.json
+   cargo run -- sessions
+   ```
+   Expected: imported session appears in session list with status `interrupted` and a new ID.
+
+3. Round-trip export/import preserves data (API key):
+   ```bash
+   SESSION_ID=$(cargo run -- run --save-session --simple "respond with only the word ROUNDTRIP" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep "created new session" | sed 's/.*session_id=//')
+   cargo run -- export-session "$SESSION_ID" --output /tmp/dk-roundtrip.json
+   cargo run -- import-session /tmp/dk-roundtrip.json
+   cargo run -- sessions
+   ```
+   Expected: both original and imported sessions visible, imported session has different ID.
+
+4. Cleanup exported test files:
+   ```bash
+   rm -f /tmp/dk-export-test.json /tmp/dk-roundtrip.json /tmp/dk-approval-test.txt
+   ```
+
 ## Debugging
 
 ```bash

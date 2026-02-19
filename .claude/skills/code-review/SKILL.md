@@ -1,6 +1,6 @@
 ---
-name: code-review
-description: Perform a comprehensive Rust code review checking for correctness, safety, performance, and idiomatic patterns
+name: rust-code-review
+description: "Rust code review: check correctness, safety, performance, and idiomatic patterns using cargo clippy/test/fmt"
 allowed-tools: Read, Grep, Glob, Bash(cargo clippy *, cargo fmt *, cargo test *)
 argument-hint: [file or directory path]
 ---

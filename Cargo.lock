@@ -1038,7 +1038,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "clap",
+ "futures",
  "glob",
  "llm",
  "regex",
@@ -1046,11 +1046,24 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "dev-killer-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dev-killer",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

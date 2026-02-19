@@ -1,9 +1,10 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rusqlite::Connection;
-use std::path::PathBuf;
 use tokio::task;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::state::SessionSummary;
 use super::{SessionPhase, SessionState, SessionStatus, Storage};
@@ -12,6 +13,15 @@ use super::{SessionPhase, SessionState, SessionStatus, Storage};
 pub struct SqliteStorage {
     /// Path to the SQLite database file
     db_path: PathBuf,
+}
+
+/// Open a SQLite connection with standard pragmas (busy_timeout).
+fn open_connection(db_path: &Path) -> Result<Connection> {
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("failed to open database: {}", db_path.display()))?;
+    conn.execute_batch("PRAGMA busy_timeout=5000;")
+        .context("failed to set busy_timeout")?;
+    Ok(conn)
 }
 
 impl SqliteStorage {
@@ -40,12 +50,11 @@ impl SqliteStorage {
 
     /// Initialize the database schema
     fn init_schema(&self) -> Result<()> {
-        let conn = Connection::open(&self.db_path)
-            .with_context(|| format!("failed to open database: {}", self.db_path.display()))?;
+        let conn = open_connection(&self.db_path)?;
 
         // Enable WAL mode for better concurrent read/write performance
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-            .context("failed to set PRAGMA options")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .context("failed to set WAL mode")?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions (
@@ -77,6 +86,26 @@ impl SqliteStorage {
         )
         .context("failed to create updated_at index")?;
 
+        // Migration: add portability columns (nullable, safe to run multiple times)
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(sessions)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if !columns.iter().any(|c| c == "project_id") {
+            conn.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT", [])
+                .context("failed to add project_id column")?;
+            debug!("migrated: added project_id column");
+        }
+        if !columns.iter().any(|c| c == "project_relative_dir") {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN project_relative_dir TEXT",
+                [],
+            )
+            .context("failed to add project_relative_dir column")?;
+            debug!("migrated: added project_relative_dir column");
+        }
+
         debug!(path = %self.db_path.display(), "initialized SQLite storage");
 
         Ok(())
@@ -90,14 +119,14 @@ impl Storage for SqliteStorage {
         let db_path = self.db_path.clone();
 
         task::spawn_blocking(move || {
-            let conn = Connection::open(&db_path)?;
+            let conn = open_connection(&db_path)?;
 
             // Serialize full session data as JSON
             let data = serde_json::to_string(&session)?;
 
             conn.execute(
-                "INSERT OR REPLACE INTO sessions (id, task, status, phase, working_dir, created_at, updated_at, error, data)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT OR REPLACE INTO sessions (id, task, status, phase, working_dir, created_at, updated_at, error, data, project_id, project_relative_dir)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     session.id,
                     session.task,
@@ -108,6 +137,8 @@ impl Storage for SqliteStorage {
                     session.updated_at.to_rfc3339(),
                     session.error,
                     data,
+                    session.project_id,
+                    session.project_relative_dir,
                 ],
             )?;
 
@@ -126,7 +157,7 @@ impl Storage for SqliteStorage {
         let db_path = self.db_path.clone();
 
         task::spawn_blocking(move || {
-            let conn = Connection::open(&db_path)?;
+            let conn = open_connection(&db_path)?;
 
             let mut stmt = conn.prepare("SELECT data FROM sessions WHERE id = ?1")?;
 
@@ -153,7 +184,7 @@ impl Storage for SqliteStorage {
         let db_path = self.db_path.clone();
 
         task::spawn_blocking(move || {
-            let conn = Connection::open(&db_path)?;
+            let conn = open_connection(&db_path)?;
 
             let mut stmt = conn.prepare(
                 "SELECT id, task, status, phase, working_dir, created_at, updated_at, error
@@ -182,12 +213,14 @@ impl Storage for SqliteStorage {
             for (id, task, status_str, phase_str, working_dir, created_at, updated_at, error) in
                 sessions
             {
-                let status = status_str
-                    .parse::<SessionStatus>()
-                    .unwrap_or(SessionStatus::Pending);
-                let phase = phase_str
-                    .parse::<SessionPhase>()
-                    .unwrap_or(SessionPhase::NotStarted);
+                let status = status_str.parse::<SessionStatus>().unwrap_or_else(|e| {
+                    warn!(id = %id, status = %status_str, error = %e, "invalid status in database, defaulting to Pending");
+                    SessionStatus::Pending
+                });
+                let phase = phase_str.parse::<SessionPhase>().unwrap_or_else(|e| {
+                    warn!(id = %id, phase = %phase_str, error = %e, "invalid phase in database, defaulting to NotStarted");
+                    SessionPhase::NotStarted
+                });
                 result.push(SessionSummary {
                     id,
                     task,
@@ -211,7 +244,7 @@ impl Storage for SqliteStorage {
         let db_path = self.db_path.clone();
 
         task::spawn_blocking(move || {
-            let conn = Connection::open(&db_path)?;
+            let conn = open_connection(&db_path)?;
             conn.execute("DELETE FROM sessions WHERE id = ?1", [&id])?;
             let changes = conn.changes();
             if changes == 0 {

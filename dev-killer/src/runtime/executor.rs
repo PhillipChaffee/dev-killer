@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use tracing::{error, info};
 
 use crate::agents::Agent;
+use crate::event::EventSender;
 use crate::llm::LlmProvider;
 use crate::session::{SessionPhase, SessionState, SessionStatus, Storage};
 use crate::tools::ToolRegistry;
@@ -37,7 +38,8 @@ impl Executor {
         provider: &dyn LlmProvider,
     ) -> Result<String> {
         info!(task, "starting agent execution");
-        let result = agent.run(task, provider, &self.tools).await?;
+        let events = EventSender::noop();
+        let result = agent.run(task, provider, &self.tools, &events).await?;
         info!("agent execution completed");
         Ok(result)
     }
@@ -62,7 +64,11 @@ impl Executor {
         storage.save(session).await?;
 
         // Run the agent
-        match agent.run(&session.task, provider, &self.tools).await {
+        let events = EventSender::noop();
+        match agent
+            .run(&session.task, provider, &self.tools, &events)
+            .await
+        {
             Ok(output) => {
                 session.complete();
                 storage.save(session).await?;

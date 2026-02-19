@@ -3,6 +3,7 @@ use async_trait::async_trait;
 
 use super::Agent;
 use super::runner::agent_loop;
+use crate::event::EventSender;
 use crate::llm::{LlmProvider, Message};
 use crate::tools::ToolRegistry;
 
@@ -78,6 +79,7 @@ Important:
         task: &str,
         provider: &dyn LlmProvider,
         tools: &ToolRegistry,
+        events: &EventSender,
     ) -> Result<String> {
         let messages = vec![Message::user(format!(
             "Test and validate the following implementation:\n\n{}",
@@ -92,6 +94,7 @@ Important:
             tools,
             Some(&["shell", "glob", "grep", "read_file"]),
             MAX_ITERATIONS,
+            events,
         )
         .await
     }

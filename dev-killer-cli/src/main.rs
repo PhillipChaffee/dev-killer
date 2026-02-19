@@ -4,9 +4,7 @@ use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 use dev_killer::{
-    AnthropicProvider, CoderAgent, EditFileTool, Executor, GlobTool, GrepTool, LlmProvider,
-    OpenAIProvider, OrchestratorAgent, Policy, ProjectConfig, ReadFileTool, SessionState,
-    SessionStatus, ShellTool, SqliteStorage, Storage, ToolRegistry, WriteFileTool,
+    DevKiller, PortableSession, ProjectConfig, SessionStatus, SqliteStorage, Storage,
 };
 
 #[derive(Parser)]
@@ -67,6 +65,32 @@ enum Commands {
         /// Session ID to delete
         session_id: String,
     },
+
+    /// Export a session to a JSON file for transfer to another environment
+    ExportSession {
+        /// Session ID to export
+        session_id: String,
+
+        /// Output file path (defaults to <session-id>.json)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
+    /// Import a session from a JSON file
+    ImportSession {
+        /// Path to the exported session JSON file
+        file: String,
+
+        /// Working directory to use for the imported session
+        #[arg(long)]
+        working_dir: Option<String>,
+    },
+
+    /// Respond with HELLO
+    Hello,
+
+    /// Respond with PIPELINE
+    Pipeline,
 }
 
 fn init_logging(verbose: bool) {
@@ -77,54 +101,6 @@ fn init_logging(verbose: bool) {
     };
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
-}
-
-fn create_provider(provider: &str, model: Option<&str>) -> Result<Box<dyn LlmProvider>> {
-    match provider {
-        "anthropic" => {
-            let p = if let Some(m) = model {
-                AnthropicProvider::new(m)?
-            } else {
-                AnthropicProvider::sonnet()?
-            };
-            Ok(Box::new(p))
-        }
-        "openai" => {
-            let p = if let Some(m) = model {
-                OpenAIProvider::new(m)?
-            } else {
-                OpenAIProvider::gpt4o()?
-            };
-            Ok(Box::new(p))
-        }
-        _ => anyhow::bail!("unknown provider: {}", provider),
-    }
-}
-
-fn create_tool_registry(policy: &Policy) -> ToolRegistry {
-    let mut registry = ToolRegistry::new();
-    // File tools
-    registry.register(ReadFileTool {
-        policy: policy.clone(),
-    });
-    registry.register(WriteFileTool {
-        policy: policy.clone(),
-    });
-    registry.register(EditFileTool {
-        policy: policy.clone(),
-    });
-    // Shell tool
-    registry.register(ShellTool {
-        policy: policy.clone(),
-    });
-    // Search tools
-    registry.register(GlobTool {
-        policy: policy.clone(),
-    });
-    registry.register(GrepTool {
-        policy: policy.clone(),
-    });
-    registry
 }
 
 /// Resolve which provider name to use.
@@ -153,7 +129,6 @@ async fn main() -> Result<()> {
             simple,
             save_session,
         } => {
-            // Apply config defaults - CLI flags override config
             let use_simple = simple || config.is_simple_mode();
             let use_save_session = save_session || config.is_save_sessions();
             let provider_name =
@@ -162,55 +137,24 @@ async fn main() -> Result<()> {
 
             info!(provider = %provider_name, simple = use_simple, save_session = use_save_session, "starting task");
 
-            let provider = create_provider(provider_name, model_name)
-                .context("failed to create LLM provider")?;
+            let mut builder = DevKiller::builder()
+                .provider_by_name(provider_name, model_name)
+                .context("failed to create LLM provider")?
+                .policy(config.policy)
+                .default_tools()
+                .simple_mode(use_simple);
 
-            let tools = create_tool_registry(&config.policy);
-
-            let result = if use_save_session {
-                // Run with session tracking
-                let storage = SqliteStorage::default_location()
+            if use_save_session {
+                builder = builder
+                    .sqlite_storage()
                     .context("failed to initialize session storage")?;
-                let executor = Executor::with_storage(tools, Box::new(storage));
+            }
 
-                let working_dir = std::env::current_dir()
-                    .context("failed to get current directory")?
-                    .to_string_lossy()
-                    .to_string();
+            let dk = builder.build().context("failed to build DevKiller")?;
 
-                let mut session = SessionState::new(&task, working_dir);
-                info!(session_id = %session.id, "created new session");
-
-                if use_simple {
-                    info!("using simple mode (single coder agent)");
-                    let agent = CoderAgent::new();
-                    executor
-                        .run_with_session(&agent, &mut session, provider.as_ref())
-                        .await
-                } else {
-                    info!("using orchestrator mode (planner -> coder -> tester -> reviewer)");
-                    let agent = OrchestratorAgent::new();
-                    executor
-                        .run_with_session(&agent, &mut session, provider.as_ref())
-                        .await
-                }
-            } else {
-                // Run without session tracking
-                let executor = Executor::new(tools);
-
-                if use_simple {
-                    info!("using simple mode (single coder agent)");
-                    let agent = CoderAgent::new();
-                    executor.run(&agent, &task, provider.as_ref()).await
-                } else {
-                    info!("using orchestrator mode (planner -> coder -> tester -> reviewer)");
-                    let agent = OrchestratorAgent::new();
-                    executor.run(&agent, &task, provider.as_ref()).await
-                }
-            };
-
-            match result {
-                Ok(output) => {
+            match dk.run(&task).await {
+                Ok(handle) => {
+                    let output = handle.output().await.context("task execution failed")?;
                     println!("\n{}", output);
                 }
                 Err(e) => {
@@ -221,7 +165,6 @@ async fn main() -> Result<()> {
         }
 
         Commands::Resume { session_id, simple } => {
-            // Apply config defaults - CLI flags override config
             let use_simple = simple || config.is_simple_mode();
             let provider_name =
                 resolve_provider(cli.provider.as_deref(), config.provider.as_deref());
@@ -229,28 +172,20 @@ async fn main() -> Result<()> {
 
             info!(session_id = %session_id, "resuming session");
 
-            let provider = create_provider(provider_name, model_name)
-                .context("failed to create LLM provider")?;
+            let dk = DevKiller::builder()
+                .provider_by_name(provider_name, model_name)
+                .context("failed to create LLM provider")?
+                .policy(config.policy)
+                .default_tools()
+                .simple_mode(use_simple)
+                .sqlite_storage()
+                .context("failed to initialize session storage")?
+                .build()
+                .context("failed to build DevKiller")?;
 
-            let tools = create_tool_registry(&config.policy);
-            let storage = SqliteStorage::default_location()
-                .context("failed to initialize session storage")?;
-            let executor = Executor::with_storage(tools, Box::new(storage));
-
-            let result = if use_simple {
-                let agent = CoderAgent::new();
-                executor
-                    .resume_session(&session_id, &agent, provider.as_ref())
-                    .await
-            } else {
-                let agent = OrchestratorAgent::new();
-                executor
-                    .resume_session(&session_id, &agent, provider.as_ref())
-                    .await
-            };
-
-            match result {
-                Ok(output) => {
+            match dk.resume(&session_id).await {
+                Ok(handle) => {
+                    let output = handle.output().await.context("resume execution failed")?;
                     println!("\n{}", output);
                 }
                 Err(e) => {
@@ -285,7 +220,6 @@ async fn main() -> Result<()> {
             println!("{}", "-".repeat(70));
 
             for session in sessions {
-                // Filter by status if specified
                 if let Some(filter_status) = status_filter {
                     if session.status != filter_status {
                         continue;
@@ -302,6 +236,59 @@ async fn main() -> Result<()> {
 
             storage.delete(&session_id).await?;
             println!("Deleted session: {}", session_id);
+        }
+
+        Commands::ExportSession { session_id, output } => {
+            let storage = SqliteStorage::default_location()
+                .context("failed to initialize session storage")?;
+
+            let session = storage
+                .load(&session_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
+
+            info!(session_id = %session_id, "exporting session");
+            let portable = PortableSession::from_session(&session);
+
+            let output_path = output.unwrap_or_else(|| format!("{}.json", session_id));
+            let json =
+                serde_json::to_string_pretty(&portable).context("failed to serialize session")?;
+
+            std::fs::write(&output_path, json)
+                .with_context(|| format!("failed to write to {}", output_path))?;
+
+            println!("Exported session {} to {}", session_id, output_path);
+        }
+
+        Commands::ImportSession { file, working_dir } => {
+            let storage = SqliteStorage::default_location()
+                .context("failed to initialize session storage")?;
+
+            let json = std::fs::read_to_string(&file)
+                .with_context(|| format!("failed to read {}", file))?;
+
+            let portable: PortableSession =
+                serde_json::from_str(&json).context("failed to parse session JSON")?;
+
+            let original_id = portable.original_id.clone();
+            let session = portable.into_session(working_dir);
+            let new_id = session.id.clone();
+
+            storage
+                .save(&session)
+                .await
+                .context("failed to save imported session")?;
+
+            info!(new_id = %new_id, original_id = %original_id, "imported session");
+            println!("Imported session as {} (ready to resume)", new_id);
+        }
+
+        Commands::Hello => {
+            println!("HELLO");
+        }
+
+        Commands::Pipeline => {
+            println!("PIPELINE");
         }
     }
 

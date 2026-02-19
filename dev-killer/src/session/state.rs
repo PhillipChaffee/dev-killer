@@ -34,6 +34,14 @@ pub struct SessionState {
 
     /// Any error message if the session failed
     pub error: Option<String>,
+
+    /// Project identifier for cross-machine portability
+    #[serde(default)]
+    pub project_id: Option<String>,
+
+    /// Relative directory within the project
+    #[serde(default)]
+    pub project_relative_dir: Option<String>,
 }
 
 impl SessionState {
@@ -50,6 +58,8 @@ impl SessionState {
             updated_at: now,
             working_dir: working_dir.into(),
             error: None,
+            project_id: None,
+            project_relative_dir: None,
         }
     }
 
@@ -224,5 +234,96 @@ impl std::fmt::Display for SessionSummary {
             "{:<10} {:<12} {:<12} {}",
             id_short, self.status, self.phase, task_preview
         )
+    }
+}
+
+/// A portable session for export/import across environments.
+///
+/// Strips absolute paths and carries enough context to recreate a session
+/// on a different machine. Serialized as JSON for interchange.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableSession {
+    /// Schema version for forward compatibility
+    pub version: u32,
+
+    /// The original session ID
+    pub original_id: String,
+
+    /// The task being worked on
+    pub task: String,
+
+    /// Conversation history
+    pub messages: Vec<Message>,
+
+    /// Session status at export time
+    pub status: SessionStatus,
+
+    /// Session phase at export time
+    pub phase: SessionPhase,
+
+    /// Project identifier (for resolving working directory on import)
+    pub project_id: Option<String>,
+
+    /// Relative directory within the project
+    pub project_relative_dir: Option<String>,
+
+    /// When the session was originally created
+    pub created_at: DateTime<Utc>,
+
+    /// When the session was exported
+    pub exported_at: DateTime<Utc>,
+
+    /// Any error from the original session
+    pub error: Option<String>,
+}
+
+impl PortableSession {
+    /// Current schema version
+    pub const CURRENT_VERSION: u32 = 1;
+
+    /// Create a portable session from a full session state.
+    pub fn from_session(session: &SessionState) -> Self {
+        Self {
+            version: Self::CURRENT_VERSION,
+            original_id: session.id.clone(),
+            task: session.task.clone(),
+            messages: session.messages.clone(),
+            status: session.status,
+            phase: session.phase,
+            project_id: session.project_id.clone(),
+            project_relative_dir: session.project_relative_dir.clone(),
+            created_at: session.created_at,
+            exported_at: Utc::now(),
+            error: session.error.clone(),
+        }
+    }
+
+    /// Import this portable session into a new SessionState.
+    ///
+    /// Assigns a new session ID and resolves the working directory.
+    /// If `working_dir` is provided, it's used directly; otherwise the current
+    /// directory is used as a fallback.
+    pub fn into_session(self, working_dir: Option<String>) -> SessionState {
+        let working_dir = working_dir.unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string())
+        });
+        let now = Utc::now();
+
+        SessionState {
+            id: Uuid::new_v4().to_string(),
+            task: self.task,
+            messages: self.messages,
+            // Imported sessions are always marked Interrupted so they can be resumed
+            status: SessionStatus::Interrupted,
+            phase: self.phase,
+            created_at: self.created_at,
+            updated_at: now,
+            working_dir,
+            error: self.error,
+            project_id: self.project_id,
+            project_relative_dir: self.project_relative_dir,
+        }
     }
 }

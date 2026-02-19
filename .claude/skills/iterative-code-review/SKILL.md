@@ -1,6 +1,6 @@
 ---
-name: iterative-code-review
-description: Run code review and automatically fix issues in a loop until all issues are resolved
+name: rust-iterative-code-review
+description: "Rust iterative code review: review, fix, and repeat using cargo check/clippy/test until all issues are resolved"
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash, Task
 argument-hint: [file or directory path]
 ---
@@ -20,7 +20,7 @@ Repeat the following cycle until no issues remain (max 5 iterations):
 Launch a code review subagent:
 ```
 Use the Task tool with subagent_type="general-purpose" to run:
-"Run /code-review on [target path]. Return ONLY a structured list of issues found,
+"Run /rust-code-review on [target path]. Return ONLY a structured list of issues found,
 or 'NO ISSUES FOUND' if the code passes all checks."
 ```
 
