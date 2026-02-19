@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use super::SessionState;
-use super::sqlite::SessionSummary;
+use super::state::SessionSummary;
 
 /// Storage backend for sessions
 #[async_trait]

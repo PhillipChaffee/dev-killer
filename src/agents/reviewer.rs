@@ -1,9 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::time::{Duration, sleep};
-use tracing::{debug, info};
 
 use super::Agent;
+use super::runner::agent_loop;
 use crate::llm::{LlmProvider, Message};
 use crate::tools::ToolRegistry;
 
@@ -44,6 +43,7 @@ Review checklist:
 - [ ] Tests pass
 - [ ] No obvious bugs or issues
 - [ ] Code follows project conventions
+- [ ] No security vulnerabilities (injection, path traversal, credential exposure)
 
 Your output should include:
 - Summary of what was implemented
@@ -67,14 +67,18 @@ Format your response like this:
 [List any problems that need to be fixed]
 
 ### Verdict
-[APPROVED/NEEDS_WORK]: [summary]
+VERDICT: APPROVED
+or
+VERDICT: NEEDS_WORK
 
+The verdict line must appear on its own line starting with "VERDICT: ".
 If NEEDS_WORK, explain what needs to be fixed.
 
 Important:
 - Be thorough but fair
 - Focus on correctness and requirements
 - Minor style issues should not block approval
+- You are read-only — do not attempt to modify any files
 "#
         .to_string()
     }
@@ -85,71 +89,21 @@ Important:
         provider: &dyn LlmProvider,
         tools: &ToolRegistry,
     ) -> Result<String> {
-        info!("reviewer agent starting");
-
-        let mut messages = vec![Message::user(format!(
+        let messages = vec![Message::user(format!(
             "Review the following implementation and determine if it is complete:\n\n{}",
             task
         ))];
 
-        for iteration in 0..MAX_ITERATIONS {
-            debug!(iteration, "reviewer iteration");
-
-            // Rate limiting to avoid hammering the API
-            if iteration > 0 {
-                sleep(Duration::from_millis(100)).await;
-            }
-
-            // Reviewer uses read-only tools and shell (for running tests)
-            let tool_refs: Vec<&dyn crate::tools::Tool> = tools
-                .all()
-                .into_iter()
-                .filter(|t| {
-                    let name = t.name();
-                    name == "shell" || name == "glob" || name == "grep" || name == "read_file"
-                })
-                .collect();
-
-            let response = provider
-                .chat(&self.system_prompt(), &messages, &tool_refs)
-                .await?;
-
-            debug!(content = %response.message.content, "reviewer response");
-
-            let tool_calls = response.tool_calls;
-
-            if tool_calls.is_empty() {
-                info!("reviewer completed");
-                return Ok(response.message.content);
-            }
-
-            // Execute tool calls
-            let mut tool_results = Vec::with_capacity(tool_calls.len());
-            for tool_call in &tool_calls {
-                debug!(tool = %tool_call.name, "reviewer executing tool");
-
-                let result = if let Some(tool) = tools.get(&tool_call.name) {
-                    match tool.execute(tool_call.arguments.clone()).await {
-                        Ok(output) => output,
-                        Err(e) => format!("Error: {}", e),
-                    }
-                } else {
-                    format!("Error: unknown tool '{}'", tool_call.name)
-                };
-
-                tool_results.push((tool_call.id.clone(), result));
-            }
-
-            messages.push(Message::assistant_with_tools(
-                &response.message.content,
-                tool_calls,
-            ));
-
-            for (id, result) in tool_results {
-                messages.push(Message::tool_result(&id, result));
-            }
-        }
-
-        anyhow::bail!("reviewer exceeded maximum iterations ({})", MAX_ITERATIONS);
+        // Reviewer is read-only — no shell, no write tools
+        agent_loop(
+            "reviewer",
+            &self.system_prompt(),
+            messages,
+            provider,
+            tools,
+            Some(&["glob", "grep", "read_file"]),
+            MAX_ITERATIONS,
+        )
+        .await
     }
 }

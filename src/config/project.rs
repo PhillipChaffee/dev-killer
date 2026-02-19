@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::Policy;
 
@@ -30,11 +30,11 @@ pub struct ProjectConfig {
 
     /// Use simple mode (single coder agent) by default
     #[serde(default)]
-    pub simple_mode: bool,
+    pub simple_mode: Option<bool>,
 
     /// Always save sessions
     #[serde(default)]
-    pub save_sessions: bool,
+    pub save_sessions: Option<bool>,
 }
 
 fn default_max_retries() -> u32 {
@@ -54,16 +54,24 @@ impl ProjectConfig {
         if let Some(global_path) = Self::global_config_path() {
             if global_path.exists() {
                 debug!(path = %global_path.display(), "loading global config");
-                let global = Self::load_from_file(&global_path)?;
-                config = config.merge(global);
+                match Self::load_from_file(&global_path) {
+                    Ok(global) => config = config.merge(global),
+                    Err(e) => {
+                        warn!(path = %global_path.display(), error = %e, "failed to load global config")
+                    }
+                }
             }
         }
 
         // Load project config (dev-killer.toml in current directory or parents)
         if let Some(project_path) = Self::find_project_config() {
             debug!(path = %project_path.display(), "loading project config");
-            let project = Self::load_from_file(&project_path)?;
-            config = config.merge(project);
+            match Self::load_from_file(&project_path) {
+                Ok(project) => config = config.merge(project),
+                Err(e) => {
+                    warn!(path = %project_path.display(), error = %e, "failed to load project config")
+                }
+            }
         }
 
         // Environment variable overrides
@@ -117,17 +125,15 @@ impl ProjectConfig {
         if other.model.is_some() {
             self.model = other.model;
         }
+        // Deny lists should union, not replace
+        self.policy.deny_paths.extend(other.policy.deny_paths);
+        self.policy.deny_commands.extend(other.policy.deny_commands);
+        // Allow lists replace (more specific config wins)
         if !other.policy.allow_paths.is_empty() {
             self.policy.allow_paths = other.policy.allow_paths;
         }
-        if !other.policy.deny_paths.is_empty() {
-            self.policy.deny_paths = other.policy.deny_paths;
-        }
         if !other.policy.allow_commands.is_empty() {
             self.policy.allow_commands = other.policy.allow_commands;
-        }
-        if !other.policy.deny_commands.is_empty() {
-            self.policy.deny_commands = other.policy.deny_commands;
         }
         // Always take explicit non-default values
         if other.max_retries != default_max_retries() {
@@ -136,11 +142,12 @@ impl ProjectConfig {
         if other.retry_delay_ms != default_retry_delay_ms() {
             self.retry_delay_ms = other.retry_delay_ms;
         }
-        if other.simple_mode {
-            self.simple_mode = true;
+        // Booleans: other overrides if explicitly set (Some)
+        if other.simple_mode.is_some() {
+            self.simple_mode = other.simple_mode;
         }
-        if other.save_sessions {
-            self.save_sessions = true;
+        if other.save_sessions.is_some() {
+            self.save_sessions = other.save_sessions;
         }
         self
     }
@@ -154,16 +161,44 @@ impl ProjectConfig {
             self.model = Some(model);
         }
         if let Ok(retries) = std::env::var("DEV_KILLER_MAX_RETRIES") {
-            if let Ok(n) = retries.parse() {
-                self.max_retries = n;
+            match retries.parse() {
+                Ok(n) => self.max_retries = n,
+                Err(_) => warn!(
+                    value = %retries,
+                    "invalid DEV_KILLER_MAX_RETRIES value, ignoring"
+                ),
             }
         }
-        if std::env::var("DEV_KILLER_SIMPLE_MODE").is_ok() {
-            self.simple_mode = true;
+        if let Ok(delay) = std::env::var("DEV_KILLER_RETRY_DELAY_MS") {
+            match delay.parse() {
+                Ok(n) => self.retry_delay_ms = n,
+                Err(_) => warn!(
+                    value = %delay,
+                    "invalid DEV_KILLER_RETRY_DELAY_MS value, ignoring"
+                ),
+            }
         }
-        if std::env::var("DEV_KILLER_SAVE_SESSIONS").is_ok() {
-            self.save_sessions = true;
+        if let Ok(val) = std::env::var("DEV_KILLER_SIMPLE_MODE") {
+            self.simple_mode = Some(parse_bool_env(&val));
+        }
+        if let Ok(val) = std::env::var("DEV_KILLER_SAVE_SESSIONS") {
+            self.save_sessions = Some(parse_bool_env(&val));
         }
         self
     }
+
+    /// Get simple_mode value (defaults to false)
+    pub fn is_simple_mode(&self) -> bool {
+        self.simple_mode.unwrap_or(false)
+    }
+
+    /// Get save_sessions value (defaults to false)
+    pub fn is_save_sessions(&self) -> bool {
+        self.save_sessions.unwrap_or(false)
+    }
+}
+
+/// Parse a boolean-like environment variable value
+fn parse_bool_env(val: &str) -> bool {
+    !matches!(val.to_lowercase().as_str(), "false" | "0" | "no" | "off")
 }

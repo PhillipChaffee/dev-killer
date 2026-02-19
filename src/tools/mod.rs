@@ -3,6 +3,7 @@ mod registry;
 mod search;
 mod shell;
 
+pub(crate) use file::validate_path;
 pub use file::{EditFileTool, ReadFileTool, WriteFileTool};
 pub use registry::ToolRegistry;
 pub use search::{GlobTool, GrepTool};

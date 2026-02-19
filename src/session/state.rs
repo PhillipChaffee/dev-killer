@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::llm::Message;
@@ -100,7 +101,7 @@ impl Default for SessionState {
 }
 
 /// Status of a session
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum SessionStatus {
     /// Session created but not started
     #[default]
@@ -116,7 +117,7 @@ pub enum SessionStatus {
 }
 
 /// Phase in the orchestration workflow
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum SessionPhase {
     /// Session not started
     #[default]
@@ -145,6 +146,24 @@ impl std::fmt::Display for SessionStatus {
     }
 }
 
+impl FromStr for SessionStatus {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pending" => Ok(Self::Pending),
+            "in_progress" | "inprogress" => Ok(Self::InProgress),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "interrupted" => Ok(Self::Interrupted),
+            _ => anyhow::bail!(
+                "invalid session status '{}' (expected: pending, in_progress, completed, failed, interrupted)",
+                s
+            ),
+        }
+    }
+}
+
 impl std::fmt::Display for SessionPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -155,5 +174,55 @@ impl std::fmt::Display for SessionPhase {
             Self::Reviewing => write!(f, "reviewing"),
             Self::Completed => write!(f, "completed"),
         }
+    }
+}
+
+impl FromStr for SessionPhase {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "not_started" | "notstarted" => Ok(Self::NotStarted),
+            "planning" => Ok(Self::Planning),
+            "implementing" => Ok(Self::Implementing),
+            "testing" => Ok(Self::Testing),
+            "reviewing" => Ok(Self::Reviewing),
+            "completed" => Ok(Self::Completed),
+            _ => anyhow::bail!(
+                "invalid session phase '{}' (expected: not_started, planning, implementing, testing, reviewing, completed)",
+                s
+            ),
+        }
+    }
+}
+
+/// Summary of a session for listing (without full message history)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub task: String,
+    pub status: SessionStatus,
+    pub phase: SessionPhase,
+    pub working_dir: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub error: Option<String>,
+}
+
+impl std::fmt::Display for SessionSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let task_preview: String = if self.task.chars().count() > 50 {
+            self.task.chars().take(47).collect::<String>() + "..."
+        } else {
+            self.task.clone()
+        };
+
+        let id_short: String = self.id.chars().take(8).collect();
+
+        write!(
+            f,
+            "{:<10} {:<12} {:<12} {}",
+            id_short, self.status, self.phase, task_preview
+        )
     }
 }

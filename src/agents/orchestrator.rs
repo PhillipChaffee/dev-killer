@@ -2,12 +2,31 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tracing::{info, warn};
 
-use super::message::TaskContext;
 use super::{Agent, CoderAgent, PlannerAgent, ReviewerAgent, TesterAgent};
 use crate::llm::LlmProvider;
 use crate::tools::ToolRegistry;
 
 const MAX_REVIEW_ITERATIONS: usize = 3;
+
+/// Check if the review output indicates approval.
+/// Looks for "VERDICT: APPROVED" on its own line, falling back to
+/// the presence of "approved" without "needs_work".
+fn is_review_approved(review: &str) -> bool {
+    // Strict check: look for "VERDICT: APPROVED" on its own line
+    for line in review.lines() {
+        let trimmed = line.trim().to_uppercase();
+        if trimmed == "VERDICT: APPROVED" {
+            return true;
+        }
+        if trimmed == "VERDICT: NEEDS_WORK" {
+            return false;
+        }
+    }
+
+    // Fallback: looser check for backwards compatibility
+    let lower = review.to_lowercase();
+    lower.contains("approved") && !lower.contains("needs_work")
+}
 
 /// Orchestrator agent that coordinates multiple specialized agents
 pub struct OrchestratorAgent {
@@ -67,9 +86,6 @@ impl Agent for OrchestratorAgent {
         provider: &dyn LlmProvider,
         tools: &ToolRegistry,
     ) -> Result<String> {
-        // Context tracks state for future persistence (Phase 4)
-        let mut _context = TaskContext::new(task);
-
         info!(task, "orchestrator starting");
 
         // Phase 1: Planning
@@ -77,8 +93,6 @@ impl Agent for OrchestratorAgent {
 
         let plan = self.planner.run(task, provider, tools).await?;
         info!(plan_length = plan.len(), "planner completed");
-
-        _context = _context.with_previous_work(format!("Plan:\n{}", plan));
 
         // Phase 2: Implementation
         info!("=== PHASE 2: IMPLEMENTATION ===");
@@ -93,16 +107,12 @@ impl Agent for OrchestratorAgent {
         let mut implementation = self.coder.run(&coder_task, provider, tools).await?;
         info!(impl_length = implementation.len(), "coder completed");
 
-        _context = _context.with_previous_work(format!("Implementation:\n{}", implementation));
-
         // Phase 3: Testing
         info!("=== PHASE 3: TESTING ===");
 
         let mut test_results = self
             .run_tests(task, &implementation, provider, tools)
             .await?;
-
-        _context = _context.with_previous_work(format!("Test Results:\n{}", test_results));
 
         // Phase 4: Review (with retry loop)
         info!("=== PHASE 4: REVIEW ===");
@@ -121,9 +131,8 @@ impl Agent for OrchestratorAgent {
             let review = self.reviewer.run(&reviewer_task, provider, tools).await?;
             info!("reviewer completed");
 
-            // Check if approved
-            let review_lower = review.to_lowercase();
-            if review_lower.contains("approved") && !review_lower.contains("needs_work") {
+            // Check if approved — look for "VERDICT: APPROVED" on its own line
+            if is_review_approved(&review) {
                 info!("task APPROVED");
 
                 return Ok(format!(
@@ -145,21 +154,22 @@ impl Agent for OrchestratorAgent {
                 let fix_task = format!(
                     "Fix the following issues identified in code review:\n\n\
                     ## Original Task\n{}\n\n\
+                    ## Implementation Plan\n{}\n\n\
+                    ## Previous Implementation\n{}\n\n\
+                    ## Test Results\n{}\n\n\
                     ## Review Feedback\n{}\n\n\
                     Please address all issues mentioned in the review.",
-                    task, review
+                    task, plan, implementation, test_results, review
                 );
 
                 // Apply fixes
                 implementation = self.coder.run(&fix_task, provider, tools).await?;
-                _context = _context.with_previous_work(format!("Fix attempt:\n{}", implementation));
 
                 // Re-run tests after fixes
                 info!("re-running tests after fixes");
                 test_results = self
                     .run_tests(task, &implementation, provider, tools)
                     .await?;
-                _context = _context.with_previous_work(format!("Test Results:\n{}", test_results));
             }
         }
 
