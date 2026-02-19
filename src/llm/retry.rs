@@ -29,7 +29,7 @@ impl RetryConfig {
         Self {
             max_retries,
             base_delay: Duration::from_millis(base_delay_ms),
-            max_delay: Duration::from_secs(60),
+            max_delay: Duration::from_secs(30),
         }
     }
 
@@ -64,6 +64,16 @@ where
                 return Ok(result);
             }
             Err(e) => {
+                // Fail fast on non-retryable errors
+                if !is_retryable_error(&e) {
+                    debug!(
+                        operation = operation_name,
+                        error = %e,
+                        "non-retryable error, failing immediately"
+                    );
+                    return Err(e);
+                }
+
                 last_error = Some(e);
 
                 if attempt < config.max_retries {

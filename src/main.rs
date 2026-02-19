@@ -5,21 +5,22 @@ use tracing_subscriber::EnvFilter;
 
 use dev_killer::{
     AnthropicProvider, CoderAgent, EditFileTool, Executor, GlobTool, GrepTool, LlmProvider,
-    OpenAIProvider, OrchestratorAgent, ProjectConfig, ReadFileTool, SessionState, ShellTool,
-    SqliteStorage, Storage, ToolRegistry, WriteFileTool,
+    OpenAIProvider, OrchestratorAgent, Policy, ProjectConfig, ReadFileTool, SessionState,
+    SessionStatus, ShellTool, SqliteStorage, Storage, ToolRegistry, WriteFileTool,
 };
 
 #[derive(Parser)]
 #[command(name = "dev-killer")]
 #[command(about = "An autonomous coding agent platform", long_about = None)]
+#[command(version)]
 struct Cli {
     /// Enable verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
 
     /// LLM provider to use (anthropic, openai)
-    #[arg(long, default_value = "anthropic")]
-    provider: String,
+    #[arg(long)]
+    provider: Option<String>,
 
     /// Model to use (provider-specific)
     #[arg(long)]
@@ -101,18 +102,39 @@ fn create_provider(provider: &str, model: Option<&str>) -> Result<Box<dyn LlmPro
     }
 }
 
-fn create_tool_registry() -> ToolRegistry {
+fn create_tool_registry(policy: &Policy) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     // File tools
-    registry.register(ReadFileTool);
-    registry.register(WriteFileTool);
-    registry.register(EditFileTool);
+    registry.register(ReadFileTool {
+        policy: policy.clone(),
+    });
+    registry.register(WriteFileTool {
+        policy: policy.clone(),
+    });
+    registry.register(EditFileTool {
+        policy: policy.clone(),
+    });
     // Shell tool
-    registry.register(ShellTool);
+    registry.register(ShellTool {
+        policy: policy.clone(),
+    });
     // Search tools
-    registry.register(GlobTool);
-    registry.register(GrepTool);
+    registry.register(GlobTool {
+        policy: policy.clone(),
+    });
+    registry.register(GrepTool {
+        policy: policy.clone(),
+    });
     registry
+}
+
+/// Resolve which provider name to use.
+/// CLI argument takes highest precedence, then config file, then default.
+fn resolve_provider<'a>(
+    cli_provider: Option<&'a str>,
+    config_provider: Option<&'a str>,
+) -> &'a str {
+    cli_provider.or(config_provider).unwrap_or("anthropic")
 }
 
 #[tokio::main]
@@ -133,9 +155,10 @@ async fn main() -> Result<()> {
             save_session,
         } => {
             // Apply config defaults - CLI flags override config
-            let use_simple = simple || config.simple_mode;
-            let use_save_session = save_session || config.save_sessions;
-            let provider_name = config.provider.as_deref().unwrap_or(&cli.provider);
+            let use_simple = simple || config.is_simple_mode();
+            let use_save_session = save_session || config.is_save_sessions();
+            let provider_name =
+                resolve_provider(cli.provider.as_deref(), config.provider.as_deref());
             let model_name = cli.model.as_deref().or(config.model.as_deref());
 
             info!(provider = %provider_name, simple = use_simple, save_session = use_save_session, "starting task");
@@ -143,7 +166,7 @@ async fn main() -> Result<()> {
             let provider = create_provider(provider_name, model_name)
                 .context("failed to create LLM provider")?;
 
-            let tools = create_tool_registry();
+            let tools = create_tool_registry(&config.policy);
 
             let result = if use_save_session {
                 // Run with session tracking
@@ -193,15 +216,16 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     error!(error = %e, "task failed");
-                    std::process::exit(1);
+                    anyhow::bail!("task failed: {}", e);
                 }
             }
         }
 
         Commands::Resume { session_id, simple } => {
             // Apply config defaults - CLI flags override config
-            let use_simple = simple || config.simple_mode;
-            let provider_name = config.provider.as_deref().unwrap_or(&cli.provider);
+            let use_simple = simple || config.is_simple_mode();
+            let provider_name =
+                resolve_provider(cli.provider.as_deref(), config.provider.as_deref());
             let model_name = cli.model.as_deref().or(config.model.as_deref());
 
             info!(session_id = %session_id, "resuming session");
@@ -209,7 +233,7 @@ async fn main() -> Result<()> {
             let provider = create_provider(provider_name, model_name)
                 .context("failed to create LLM provider")?;
 
-            let tools = create_tool_registry();
+            let tools = create_tool_registry(&config.policy);
             let storage = SqliteStorage::default_location()
                 .context("failed to initialize session storage")?;
             let executor = Executor::with_storage(tools, Box::new(storage));
@@ -232,7 +256,7 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     error!(error = %e, "resume failed");
-                    std::process::exit(1);
+                    anyhow::bail!("resume failed: {}", e);
                 }
             }
         }
@@ -242,6 +266,16 @@ async fn main() -> Result<()> {
                 .context("failed to initialize session storage")?;
 
             let sessions = storage.list().await?;
+
+            // Parse status filter if provided
+            let status_filter = if let Some(ref s) = status {
+                Some(
+                    s.parse::<SessionStatus>()
+                        .with_context(|| format!("invalid status filter: {}", s))?,
+                )
+            } else {
+                None
+            };
 
             if sessions.is_empty() {
                 println!("No sessions found.");
@@ -253,8 +287,8 @@ async fn main() -> Result<()> {
 
             for session in sessions {
                 // Filter by status if specified
-                if let Some(ref filter_status) = status {
-                    if session.status != *filter_status {
+                if let Some(filter_status) = status_filter {
+                    if session.status != filter_status {
                         continue;
                     }
                 }

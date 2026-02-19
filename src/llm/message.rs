@@ -55,6 +55,21 @@ impl Message {
             tool_result: Some(ToolResult {
                 tool_call_id: tool_call_id.into(),
                 result: result.into(),
+                is_error: false,
+            }),
+        }
+    }
+
+    /// Create a tool error result message
+    pub fn tool_error(tool_call_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Tool,
+            content: String::new(),
+            tool_calls: Vec::new(),
+            tool_result: Some(ToolResult {
+                tool_call_id: tool_call_id.into(),
+                result: error.into(),
+                is_error: true,
             }),
         }
     }
@@ -70,8 +85,6 @@ pub enum MessageRole {
     Assistant,
     /// Message containing tool output
     Tool,
-    /// System prompt
-    System,
 }
 
 /// A tool call made by the assistant
@@ -92,4 +105,7 @@ pub struct ToolResult {
     pub tool_call_id: String,
     /// The result of the tool execution
     pub result: String,
+    /// Whether this result represents an error
+    #[serde(default)]
+    pub is_error: bool,
 }

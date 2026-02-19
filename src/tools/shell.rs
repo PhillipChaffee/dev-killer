@@ -6,12 +6,29 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 use super::Tool;
+use super::validate_path;
+use crate::config::Policy;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+const MAX_TIMEOUT_SECS: u64 = 300;
 const MAX_OUTPUT_BYTES: usize = 100_000;
 
+/// Find the largest byte index <= `index` that is a valid char boundary.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Tool for executing shell commands
-pub struct ShellTool;
+pub struct ShellTool {
+    pub policy: Policy,
+}
 
 #[async_trait]
 impl Tool for ShellTool {
@@ -37,7 +54,7 @@ impl Tool for ShellTool {
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Optional timeout in seconds (default: 120)"
+                    "description": "Optional timeout in seconds (default: 120, max: 300)"
                 }
             },
             "required": ["command"]
@@ -52,26 +69,43 @@ impl Tool for ShellTool {
         let working_dir = params["working_dir"].as_str();
         let timeout_secs = params["timeout_secs"]
             .as_u64()
-            .unwrap_or(DEFAULT_TIMEOUT_SECS);
+            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .min(MAX_TIMEOUT_SECS);
 
         // Validate command for dangerous patterns
-        validate_command(command)?;
+        validate_command(command, &self.policy)?;
+
+        // Validate working directory if provided
+        if let Some(dir) = working_dir {
+            validate_path(dir, &self.policy)?;
+        }
 
         // Build the command
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(command);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         if let Some(dir) = working_dir {
             cmd.current_dir(dir);
         }
 
-        // Execute with timeout
-        let output = timeout(Duration::from_secs(timeout_secs), cmd.output())
-            .await
-            .with_context(|| format!("command timed out after {} seconds", timeout_secs))?
-            .with_context(|| format!("failed to execute command: {}", command))?;
+        // Spawn and wait with timeout — kill_on_drop ensures the child is
+        // killed if the future is dropped (e.g. on timeout)
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn command: {}", command))?;
+
+        let output =
+            match timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
+                Ok(result) => {
+                    result.with_context(|| format!("failed to execute command: {}", command))?
+                }
+                Err(_) => {
+                    anyhow::bail!("command timed out after {} seconds", timeout_secs);
+                }
+            };
 
         // Collect output
         let mut result = String::new();
@@ -96,9 +130,10 @@ impl Tool for ShellTool {
             result.push_str(&format!("\n[exit code: {}]", code));
         }
 
-        // Truncate if too long
+        // Truncate if too long (find nearest char boundary to avoid panic)
         if result.len() > MAX_OUTPUT_BYTES {
-            result.truncate(MAX_OUTPUT_BYTES);
+            let boundary = floor_char_boundary(&result, MAX_OUTPUT_BYTES);
+            result.truncate(boundary);
             result.push_str("\n... [output truncated]");
         }
 
@@ -111,7 +146,15 @@ impl Tool for ShellTool {
 }
 
 /// Validate command for dangerous patterns
-fn validate_command(command: &str) -> Result<()> {
+fn validate_command(command: &str, policy: &Policy) -> Result<()> {
+    // Check policy deny_commands
+    let command_lower = command.to_lowercase();
+    for denied in &policy.deny_commands {
+        if command_lower.contains(&denied.to_lowercase()) {
+            anyhow::bail!("command '{}' is denied by policy", denied);
+        }
+    }
+
     // Deny list of dangerous command patterns
     let dangerous_patterns = [
         "rm -rf /",
@@ -130,7 +173,6 @@ fn validate_command(command: &str) -> Result<()> {
         "sudo mkfs",
     ];
 
-    let command_lower = command.to_lowercase();
     for pattern in &dangerous_patterns {
         if command_lower.contains(&pattern.to_lowercase()) {
             anyhow::bail!("command contains dangerous pattern: {}", pattern);
@@ -209,38 +251,74 @@ fn validate_sensitive_paths(command: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn default_policy() -> Policy {
+        Policy::default()
+    }
+
     #[test]
     fn validate_safe_commands() {
-        assert!(validate_command("ls -la").is_ok());
-        assert!(validate_command("cargo build").is_ok());
-        assert!(validate_command("git status").is_ok());
-        assert!(validate_command("echo hello").is_ok());
+        let policy = default_policy();
+        assert!(validate_command("ls -la", &policy).is_ok());
+        assert!(validate_command("cargo build", &policy).is_ok());
+        assert!(validate_command("git status", &policy).is_ok());
+        assert!(validate_command("echo hello", &policy).is_ok());
     }
 
     #[test]
     fn validate_dangerous_commands() {
-        assert!(validate_command("rm -rf /").is_err());
-        assert!(validate_command("sudo rm -rf /tmp").is_err());
-        assert!(validate_command("dd if=/dev/zero of=/dev/sda").is_err());
+        let policy = default_policy();
+        assert!(validate_command("rm -rf /", &policy).is_err());
+        assert!(validate_command("sudo rm -rf /tmp", &policy).is_err());
+        assert!(validate_command("dd if=/dev/zero of=/dev/sda", &policy).is_err());
     }
 
     #[test]
     fn validate_sensitive_path_access() {
+        let policy = default_policy();
         // Should block reading /etc files
-        assert!(validate_command("cat /etc/passwd").is_err());
-        assert!(validate_command("head /etc/shadow").is_err());
-        assert!(validate_command("tail /etc/hosts").is_err());
+        assert!(validate_command("cat /etc/passwd", &policy).is_err());
+        assert!(validate_command("head /etc/shadow", &policy).is_err());
+        assert!(validate_command("tail /etc/hosts", &policy).is_err());
 
         // Should block reading ~/.ssh
-        assert!(validate_command("cat ~/.ssh/id_rsa").is_err());
-        assert!(validate_command("cat $HOME/.ssh/config").is_err());
+        assert!(validate_command("cat ~/.ssh/id_rsa", &policy).is_err());
+        assert!(validate_command("cat $HOME/.ssh/config", &policy).is_err());
 
         // Should block reading .env files
-        assert!(validate_command("cat .env").is_err());
-        assert!(validate_command("cat .env.local").is_err());
+        assert!(validate_command("cat .env", &policy).is_err());
+        assert!(validate_command("cat .env.local", &policy).is_err());
 
         // Should allow non-reading commands in general
-        assert!(validate_command("ls /etc").is_ok());
-        assert!(validate_command("ls -la").is_ok());
+        assert!(validate_command("ls /etc", &policy).is_ok());
+        assert!(validate_command("ls -la", &policy).is_ok());
+    }
+
+    #[test]
+    fn validate_policy_deny_commands() {
+        let policy = Policy {
+            deny_commands: vec!["git push".to_string()],
+            ..Policy::default()
+        };
+        assert!(validate_command("git push origin main", &policy).is_err());
+        assert!(validate_command("git status", &policy).is_ok());
+    }
+
+    #[test]
+    fn validate_nested_shell_dangerous() {
+        let policy = default_policy();
+        // Nested shell with dangerous command
+        assert!(validate_command("bash -c 'rm -rf /'", &policy).is_err());
+    }
+
+    #[test]
+    fn validate_fork_bomb() {
+        let policy = default_policy();
+        assert!(validate_command(":(){:|:&};:", &policy).is_err());
+    }
+
+    #[test]
+    fn validate_redirect_sensitive_path() {
+        let policy = default_policy();
+        assert!(validate_command("python < /etc/passwd", &policy).is_err());
     }
 }

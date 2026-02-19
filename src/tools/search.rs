@@ -6,12 +6,28 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 use super::Tool;
+use super::validate_path;
+use crate::config::Policy;
 
 const MAX_RESULTS: usize = 100;
 const MAX_CONTENT_PREVIEW: usize = 200;
 
+/// Find the largest byte index <= `index` that is a valid char boundary.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Tool for finding files by glob pattern
-pub struct GlobTool;
+pub struct GlobTool {
+    pub policy: Policy,
+}
 
 #[async_trait]
 impl Tool for GlobTool {
@@ -47,6 +63,11 @@ impl Tool for GlobTool {
 
         let base_dir = params["base_dir"].as_str();
 
+        // Validate base directory if provided
+        if let Some(base) = base_dir {
+            validate_path(base, &self.policy)?;
+        }
+
         // Build the full pattern
         let full_pattern = if let Some(base) = base_dir {
             format!("{}/{}", base.trim_end_matches('/'), pattern)
@@ -62,9 +83,13 @@ impl Tool for GlobTool {
         for entry in entries {
             match entry {
                 Ok(path) => {
-                    matches.push(path.display().to_string());
-                    if matches.len() >= MAX_RESULTS {
-                        break;
+                    // Filter results through path validation
+                    let path_str = path.display().to_string();
+                    if validate_path(&path_str, &self.policy).is_ok() {
+                        matches.push(path_str);
+                        if matches.len() >= MAX_RESULTS {
+                            break;
+                        }
                     }
                 }
                 Err(e) => {
@@ -93,7 +118,9 @@ impl Tool for GlobTool {
 }
 
 /// Tool for searching file contents with regex
-pub struct GrepTool;
+pub struct GrepTool {
+    pub policy: Policy,
+}
 
 #[async_trait]
 impl Tool for GrepTool {
@@ -142,6 +169,9 @@ impl Tool for GrepTool {
         let file_pattern = params["file_pattern"].as_str();
         let case_insensitive = params["case_insensitive"].as_bool().unwrap_or(false);
 
+        // Validate the search path
+        validate_path(path, &self.policy)?;
+
         // Build regex
         let regex = if case_insensitive {
             Regex::new(&format!("(?i){}", pattern))
@@ -156,7 +186,7 @@ impl Tool for GrepTool {
         if path.is_file() {
             search_file(path, &regex, &mut results)?;
         } else if path.is_dir() {
-            search_directory(path, &regex, file_pattern, &mut results)?;
+            search_directory(path, &regex, file_pattern, &self.policy, &mut results)?;
         } else {
             anyhow::bail!("path does not exist: {}", path.display());
         }
@@ -192,7 +222,8 @@ fn search_file(path: &Path, regex: &Regex, results: &mut Vec<String>) -> Result<
 
         if regex.is_match(line) {
             let preview = if line.len() > MAX_CONTENT_PREVIEW {
-                format!("{}...", &line[..MAX_CONTENT_PREVIEW])
+                let boundary = floor_char_boundary(line, MAX_CONTENT_PREVIEW);
+                format!("{}...", &line[..boundary])
             } else {
                 line.to_string()
             };
@@ -207,6 +238,7 @@ fn search_directory(
     dir: &Path,
     regex: &Regex,
     file_pattern: Option<&str>,
+    policy: &Policy,
     results: &mut Vec<String>,
 ) -> Result<()> {
     let glob_pattern = if let Some(fp) = file_pattern {
@@ -224,7 +256,11 @@ fn search_directory(
 
         if let Ok(path) = entry {
             if path.is_file() {
-                search_file(&path, regex, results)?;
+                // Skip files that fail path validation
+                let path_str = path.display().to_string();
+                if validate_path(&path_str, policy).is_ok() {
+                    search_file(&path, regex, results)?;
+                }
             }
         }
     }
@@ -246,7 +282,9 @@ mod tests {
         fs::write(&file1, "hello").unwrap();
         fs::write(&file2, "world").unwrap();
 
-        let tool = GlobTool;
+        let tool = GlobTool {
+            policy: Policy::default(),
+        };
         let params = json!({
             "pattern": "*.txt",
             "base_dir": dir.path().to_str().unwrap()
@@ -264,7 +302,9 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "hello world\nfoo bar\nhello again").unwrap();
 
-        let tool = GrepTool;
+        let tool = GrepTool {
+            policy: Policy::default(),
+        };
         let params = json!({
             "pattern": "hello",
             "path": file.to_str().unwrap()

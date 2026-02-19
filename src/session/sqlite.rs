@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use tokio::task;
 use tracing::debug;
 
-use super::{SessionState, Storage};
+use super::state::SessionSummary;
+use super::{SessionPhase, SessionState, SessionStatus, Storage};
 
 /// SQLite-based session storage
 pub struct SqliteStorage {
@@ -41,6 +42,10 @@ impl SqliteStorage {
     fn init_schema(&self) -> Result<()> {
         let conn = Connection::open(&self.db_path)
             .with_context(|| format!("failed to open database: {}", self.db_path.display()))?;
+
+        // Enable WAL mode for better concurrent read/write performance
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+            .context("failed to set PRAGMA options")?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions (
@@ -158,20 +163,44 @@ impl Storage for SqliteStorage {
 
             let sessions = stmt
                 .query_map([], |row| {
-                    Ok(SessionSummary {
-                        id: row.get(0)?,
-                        task: row.get(1)?,
-                        status: row.get(2)?,
-                        phase: row.get(3)?,
-                        working_dir: row.get(4)?,
-                        created_at: row.get(5)?,
-                        updated_at: row.get(6)?,
-                        error: row.get(7)?,
-                    })
+                    let status_str: String = row.get(2)?;
+                    let phase_str: String = row.get(3)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        status_str,
+                        phase_str,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                    ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
 
-            Ok(sessions)
+            let mut result = Vec::with_capacity(sessions.len());
+            for (id, task, status_str, phase_str, working_dir, created_at, updated_at, error) in
+                sessions
+            {
+                let status = status_str
+                    .parse::<SessionStatus>()
+                    .unwrap_or(SessionStatus::Pending);
+                let phase = phase_str
+                    .parse::<SessionPhase>()
+                    .unwrap_or(SessionPhase::NotStarted);
+                result.push(SessionSummary {
+                    id,
+                    task,
+                    status,
+                    phase,
+                    working_dir,
+                    created_at,
+                    updated_at,
+                    error,
+                });
+            }
+
+            Ok(result)
         })
         .await
         .context("spawn_blocking failed")?
@@ -184,6 +213,10 @@ impl Storage for SqliteStorage {
         task::spawn_blocking(move || {
             let conn = Connection::open(&db_path)?;
             conn.execute("DELETE FROM sessions WHERE id = ?1", [&id])?;
+            let changes = conn.changes();
+            if changes == 0 {
+                anyhow::bail!("session '{}' not found", id);
+            }
             debug!(id = %id, "deleted session");
             Ok::<_, anyhow::Error>(())
         })
@@ -191,38 +224,5 @@ impl Storage for SqliteStorage {
         .context("spawn_blocking failed")??;
 
         Ok(())
-    }
-}
-
-/// Summary of a session for listing (without full message history)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionSummary {
-    pub id: String,
-    pub task: String,
-    pub status: String,
-    pub phase: String,
-    pub working_dir: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub error: Option<String>,
-}
-
-impl std::fmt::Display for SessionSummary {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Use chars() to handle UTF-8 safely
-        let task_preview: String = if self.task.chars().count() > 50 {
-            self.task.chars().take(47).collect::<String>() + "..."
-        } else {
-            self.task.clone()
-        };
-
-        // Session IDs are UUIDs so safe to slice, but use chars for safety
-        let id_short: String = self.id.chars().take(8).collect();
-
-        write!(
-            f,
-            "{} | {} | {} | {}",
-            id_short, self.status, self.phase, task_preview
-        )
     }
 }

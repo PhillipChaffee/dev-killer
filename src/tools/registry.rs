@@ -43,3 +43,73 @@ impl Default for ToolRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use serde_json::Value;
+
+    struct FakeTool {
+        tool_name: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for FakeTool {
+        fn name(&self) -> &str {
+            self.tool_name
+        }
+        fn description(&self) -> &str {
+            "fake"
+        }
+        fn schema(&self) -> Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _params: Value) -> Result<String> {
+            Ok("ok".into())
+        }
+    }
+
+    #[test]
+    fn register_and_get_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(FakeTool {
+            tool_name: "test_tool",
+        });
+
+        assert!(registry.get("test_tool").is_some());
+        assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn all_returns_registered_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(FakeTool { tool_name: "a" });
+        registry.register(FakeTool { tool_name: "b" });
+
+        let all = registry.all();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn names_returns_registered_names() {
+        let mut registry = ToolRegistry::new();
+        registry.register(FakeTool { tool_name: "foo" });
+        registry.register(FakeTool { tool_name: "bar" });
+
+        let mut names = registry.names();
+        names.sort();
+        assert_eq!(names, vec!["bar", "foo"]);
+    }
+
+    #[test]
+    fn duplicate_registration_overwrites() {
+        let mut registry = ToolRegistry::new();
+        registry.register(FakeTool { tool_name: "dup" });
+        registry.register(FakeTool { tool_name: "dup" });
+
+        // Should still have 1 entry
+        assert_eq!(registry.names().len(), 1);
+    }
+}

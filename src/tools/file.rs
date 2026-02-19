@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::Tool;
+use crate::config::Policy;
 
 /// Validates a file path for security.
 ///
@@ -11,9 +12,13 @@ use super::Tool;
 /// 1. Canonicalizes the path to resolve symlinks and relative paths
 /// 2. Rejects paths containing ".." traversal components
 /// 3. Rejects paths to sensitive locations (/etc, ~/.ssh, .env files)
-fn validate_path(path: &str) -> Result<PathBuf> {
+/// 4. Consults the Policy allow/deny lists
+pub(crate) fn validate_path(path: &str, policy: &Policy) -> Result<PathBuf> {
     // Check for path traversal attempts before canonicalization
-    if path.contains("..") {
+    if Path::new(path)
+        .components()
+        .any(|c| c == Component::ParentDir)
+    {
         anyhow::bail!("path traversal detected: '..' is not allowed in paths");
     }
 
@@ -39,6 +44,29 @@ fn validate_path(path: &str) -> Result<PathBuf> {
 
     let path_str = canonical.to_string_lossy();
 
+    // Check policy allow_paths first — if the path is explicitly allowed, skip deny checks
+    let explicitly_allowed = policy
+        .allow_paths
+        .iter()
+        .any(|allowed| path_str.starts_with(allowed));
+
+    if !explicitly_allowed {
+        // Check policy deny_paths
+        for denied in &policy.deny_paths {
+            if path_str.starts_with(denied) {
+                anyhow::bail!("access to {} is denied by policy", denied);
+            }
+        }
+
+        // Check hardcoded sensitive paths
+        check_hardcoded_path_denials(&canonical, &path_str)?;
+    }
+
+    Ok(canonical)
+}
+
+/// Check hardcoded path denials (system-sensitive directories)
+fn check_hardcoded_path_denials(canonical: &Path, path_str: &str) -> Result<()> {
     // Check for sensitive system directories
     // Note: On macOS, /etc is a symlink to /private/etc
     if path_str.starts_with("/etc/")
@@ -68,10 +96,11 @@ fn validate_path(path: &str) -> Result<PathBuf> {
             anyhow::bail!("access to ~/.aws is not allowed");
         }
 
-        // Check for config directory (may contain tokens)
+        // Check for config directory (may contain tokens), but allow dev-killer's own config
         let config_dir = Path::new(&home).join(".config");
-        if canonical.starts_with(&config_dir) {
-            anyhow::bail!("access to ~/.config is not allowed");
+        let own_config_dir = config_dir.join("dev-killer");
+        if canonical.starts_with(&config_dir) && !canonical.starts_with(&own_config_dir) {
+            anyhow::bail!("access to ~/.config is not allowed (except ~/.config/dev-killer/)");
         }
     }
 
@@ -104,11 +133,13 @@ fn validate_path(path: &str) -> Result<PathBuf> {
         }
     }
 
-    Ok(canonical)
+    Ok(())
 }
 
 /// Tool for reading files
-pub struct ReadFileTool;
+pub struct ReadFileTool {
+    pub policy: Policy,
+}
 
 #[async_trait]
 impl Tool for ReadFileTool {
@@ -138,7 +169,7 @@ impl Tool for ReadFileTool {
             .as_str()
             .context("missing 'path' parameter")?;
 
-        let validated_path = validate_path(path)?;
+        let validated_path = validate_path(path, &self.policy)?;
 
         let content = tokio::fs::read_to_string(&validated_path)
             .await
@@ -149,7 +180,9 @@ impl Tool for ReadFileTool {
 }
 
 /// Tool for writing files
-pub struct WriteFileTool;
+pub struct WriteFileTool {
+    pub policy: Policy,
+}
 
 #[async_trait]
 impl Tool for WriteFileTool {
@@ -187,7 +220,7 @@ impl Tool for WriteFileTool {
             .context("missing 'content' parameter")?;
 
         // First validate the path to ensure it's not in a restricted location
-        let validated_path = validate_path(path)?;
+        let validated_path = validate_path(path, &self.policy)?;
 
         // Create parent directories using the validated path, not the raw input
         if let Some(parent) = validated_path.parent() {
@@ -211,7 +244,9 @@ impl Tool for WriteFileTool {
 }
 
 /// Tool for editing files (find and replace)
-pub struct EditFileTool;
+pub struct EditFileTool {
+    pub policy: Policy,
+}
 
 #[async_trait]
 impl Tool for EditFileTool {
@@ -255,7 +290,11 @@ impl Tool for EditFileTool {
             .as_str()
             .context("missing 'new_string' parameter")?;
 
-        let validated_path = validate_path(path)?;
+        if old_string.is_empty() {
+            anyhow::bail!("old_string must not be empty");
+        }
+
+        let validated_path = validate_path(path, &self.policy)?;
 
         let content = tokio::fs::read_to_string(&validated_path)
             .await
@@ -280,5 +319,108 @@ impl Tool for EditFileTool {
             .with_context(|| format!("failed to write file: {}", path))?;
 
         Ok(format!("Successfully edited {}", path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Policy;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn default_policy() -> Policy {
+        Policy::default()
+    }
+
+    #[test]
+    fn validate_path_rejects_parent_dir_traversal() {
+        let dir = tempdir().unwrap();
+        let path = format!("{}/../etc/passwd", dir.path().display());
+        assert!(validate_path(&path, &default_policy()).is_err());
+    }
+
+    #[test]
+    fn validate_path_allows_dotdot_in_filename() {
+        // A file named "data..backup.txt" should be allowed — ".." is in the
+        // filename, not a path component
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("data..backup.txt");
+        fs::write(&file, "test").unwrap();
+
+        let result = validate_path(file.to_str().unwrap(), &default_policy());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_path_blocks_env_files() {
+        let dir = tempdir().unwrap();
+        let env_file = dir.path().join(".env");
+        fs::write(&env_file, "SECRET=foo").unwrap();
+
+        assert!(validate_path(env_file.to_str().unwrap(), &default_policy()).is_err());
+
+        let env_local = dir.path().join(".env.local");
+        fs::write(&env_local, "SECRET=foo").unwrap();
+        assert!(validate_path(env_local.to_str().unwrap(), &default_policy()).is_err());
+    }
+
+    #[test]
+    fn validate_path_blocks_git_directory() {
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir(&git_dir).unwrap();
+        let config_file = git_dir.join("config");
+        fs::write(&config_file, "test").unwrap();
+
+        assert!(validate_path(config_file.to_str().unwrap(), &default_policy()).is_err());
+    }
+
+    #[test]
+    fn validate_path_respects_policy_allow() {
+        let dir = tempdir().unwrap();
+        // Canonicalize the dir path so it matches what validate_path resolves
+        // (on macOS, /var -> /private/var)
+        let canonical_dir = fs::canonicalize(dir.path()).unwrap();
+        let file = dir.path().join(".env");
+        fs::write(&file, "test").unwrap();
+
+        // Normally blocked
+        assert!(validate_path(file.to_str().unwrap(), &default_policy()).is_err());
+
+        // But allowed by policy
+        let policy = Policy {
+            allow_paths: vec![canonical_dir.to_string_lossy().to_string()],
+            ..Policy::default()
+        };
+        assert!(validate_path(file.to_str().unwrap(), &policy).is_ok());
+    }
+
+    #[test]
+    fn validate_path_respects_policy_deny() {
+        let dir = tempdir().unwrap();
+        // Canonicalize the dir path so it matches what validate_path resolves
+        let canonical_dir = fs::canonicalize(dir.path()).unwrap();
+        let file = dir.path().join("data.txt");
+        fs::write(&file, "test").unwrap();
+
+        // Normally allowed
+        assert!(validate_path(file.to_str().unwrap(), &default_policy()).is_ok());
+
+        // But denied by policy
+        let policy = Policy {
+            deny_paths: vec![canonical_dir.to_string_lossy().to_string()],
+            ..Policy::default()
+        };
+        assert!(validate_path(file.to_str().unwrap(), &policy).is_err());
+    }
+
+    #[test]
+    fn validate_path_allows_normal_files() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        fs::write(&file, "hello").unwrap();
+
+        assert!(validate_path(file.to_str().unwrap(), &default_policy()).is_ok());
     }
 }

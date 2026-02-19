@@ -1,9 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::time::{Duration, sleep};
-use tracing::{debug, info};
 
 use super::Agent;
+use super::runner::agent_loop;
 use crate::llm::{LlmProvider, Message};
 use crate::tools::ToolRegistry;
 
@@ -65,6 +64,7 @@ Important:
 - Include code snippets where helpful
 - Consider edge cases
 - Think about testing requirements
+- When you have gathered enough information, stop using tools and output your implementation plan
 "#
         .to_string()
     }
@@ -75,71 +75,20 @@ Important:
         provider: &dyn LlmProvider,
         tools: &ToolRegistry,
     ) -> Result<String> {
-        info!("planner agent starting");
-
-        let mut messages = vec![Message::user(format!(
+        let messages = vec![Message::user(format!(
             "Create an implementation plan for the following task:\n\n{}",
             task
         ))];
 
-        for iteration in 0..MAX_ITERATIONS {
-            debug!(iteration, "planner iteration");
-
-            // Rate limiting to avoid hammering the API
-            if iteration > 0 {
-                sleep(Duration::from_millis(100)).await;
-            }
-
-            // Get read-only tools (glob, grep, read_file)
-            let tool_refs: Vec<&dyn crate::tools::Tool> = tools
-                .all()
-                .into_iter()
-                .filter(|t| {
-                    let name = t.name();
-                    name == "glob" || name == "grep" || name == "read_file"
-                })
-                .collect();
-
-            let response = provider
-                .chat(&self.system_prompt(), &messages, &tool_refs)
-                .await?;
-
-            debug!(content = %response.message.content, "planner response");
-
-            let tool_calls = response.tool_calls;
-
-            if tool_calls.is_empty() {
-                info!("planner completed");
-                return Ok(response.message.content);
-            }
-
-            // Execute tool calls
-            let mut tool_results = Vec::with_capacity(tool_calls.len());
-            for tool_call in &tool_calls {
-                debug!(tool = %tool_call.name, "planner executing tool");
-
-                let result = if let Some(tool) = tools.get(&tool_call.name) {
-                    match tool.execute(tool_call.arguments.clone()).await {
-                        Ok(output) => output,
-                        Err(e) => format!("Error: {}", e),
-                    }
-                } else {
-                    format!("Error: unknown tool '{}'", tool_call.name)
-                };
-
-                tool_results.push((tool_call.id.clone(), result));
-            }
-
-            messages.push(Message::assistant_with_tools(
-                &response.message.content,
-                tool_calls,
-            ));
-
-            for (id, result) in tool_results {
-                messages.push(Message::tool_result(&id, result));
-            }
-        }
-
-        anyhow::bail!("planner exceeded maximum iterations ({})", MAX_ITERATIONS);
+        agent_loop(
+            "planner",
+            &self.system_prompt(),
+            messages,
+            provider,
+            tools,
+            Some(&["glob", "grep", "read_file"]),
+            MAX_ITERATIONS,
+        )
+        .await
     }
 }
