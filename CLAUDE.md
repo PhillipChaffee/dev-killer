@@ -129,8 +129,6 @@ impl Agent for YourAgent {
 ## Testing Strategy
 
 - Unit tests: In same file with `#[cfg(test)]` module
-- E2E tests: In `tests/` directory (mock-based run with `cargo test`, live API tests run with `cargo test -- --ignored`)
-- Test utilities: In `tests/common/mod.rs` (`MockLlmProvider`, `create_test_tool_registry()`)
 - Test file operations with `tempfile` crate
 - Test async code with `#[tokio::test]`
 - Use descriptive test names: `test_<function>_<scenario>_<expected>`

@@ -1,5 +1,4 @@
 [![CI](https://github.com/PhillipChaffee/dev-killer/actions/workflows/ci.yml/badge.svg)](https://github.com/PhillipChaffee/dev-killer/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/PhillipChaffee/dev-killer/graph/badge.svg)](https://codecov.io/gh/PhillipChaffee/dev-killer)
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
