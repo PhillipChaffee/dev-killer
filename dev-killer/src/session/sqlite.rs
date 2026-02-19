@@ -77,6 +77,26 @@ impl SqliteStorage {
         )
         .context("failed to create updated_at index")?;
 
+        // Migration: add portability columns (nullable, safe to run multiple times)
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(sessions)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if !columns.iter().any(|c| c == "project_id") {
+            conn.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT", [])
+                .context("failed to add project_id column")?;
+            debug!("migrated: added project_id column");
+        }
+        if !columns.iter().any(|c| c == "project_relative_dir") {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN project_relative_dir TEXT",
+                [],
+            )
+            .context("failed to add project_relative_dir column")?;
+            debug!("migrated: added project_relative_dir column");
+        }
+
         debug!(path = %self.db_path.display(), "initialized SQLite storage");
 
         Ok(())

@@ -2,7 +2,7 @@ mod coder;
 mod orchestrator;
 mod planner;
 mod reviewer;
-mod runner;
+pub(crate) mod runner;
 mod tester;
 
 pub use coder::CoderAgent;
@@ -14,6 +14,7 @@ pub use tester::TesterAgent;
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::event::EventSender;
 use crate::llm::LlmProvider;
 use crate::tools::ToolRegistry;
 
@@ -29,5 +30,6 @@ pub trait Agent: Send + Sync {
         task: &str,
         provider: &dyn LlmProvider,
         tools: &ToolRegistry,
+        events: &EventSender,
     ) -> Result<String>;
 }

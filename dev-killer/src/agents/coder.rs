@@ -3,6 +3,7 @@ use async_trait::async_trait;
 
 use super::Agent;
 use super::runner::agent_loop;
+use crate::event::EventSender;
 use crate::llm::{LlmProvider, Message};
 use crate::tools::ToolRegistry;
 
@@ -64,6 +65,7 @@ Output format when complete:
         task: &str,
         provider: &dyn LlmProvider,
         tools: &ToolRegistry,
+        events: &EventSender,
     ) -> Result<String> {
         let messages = vec![Message::user(task)];
 
@@ -75,6 +77,7 @@ Output format when complete:
             tools,
             None, // All tools available
             MAX_ITERATIONS,
+            events,
         )
         .await
     }

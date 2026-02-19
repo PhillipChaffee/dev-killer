@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::Tool;
 
 /// Registry for tools
+#[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
 }
@@ -35,6 +36,32 @@ impl ToolRegistry {
     /// Get tool names
     pub fn names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
+    }
+}
+
+impl ToolRegistry {
+    /// Create a registry with all default tools configured with the given policy
+    pub fn with_default_tools(policy: &crate::config::Policy) -> Self {
+        let mut registry = Self::new();
+        registry.register(super::ReadFileTool {
+            policy: policy.clone(),
+        });
+        registry.register(super::WriteFileTool {
+            policy: policy.clone(),
+        });
+        registry.register(super::EditFileTool {
+            policy: policy.clone(),
+        });
+        registry.register(super::ShellTool {
+            policy: policy.clone(),
+        });
+        registry.register(super::GlobTool {
+            policy: policy.clone(),
+        });
+        registry.register(super::GrepTool {
+            policy: policy.clone(),
+        });
+        registry
     }
 }
 

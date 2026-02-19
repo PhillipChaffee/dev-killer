@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::StreamExt;
 use llm::builder::{LLMBackend, LLMBuilder};
-use llm::chat::{ChatMessage, ChatRole, FunctionTool, MessageType, Tool as LlmTool};
+use llm::chat::{ChatMessage, ChatRole, FunctionTool, MessageType, StreamChunk, Tool as LlmTool};
+use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
 
@@ -23,20 +25,9 @@ struct ChatParams<'a> {
     tools: &'a [&'a dyn Tool],
 }
 
-/// Shared implementation for LLM providers backed by the `llm` crate.
-async fn chat_impl(params: ChatParams<'_>) -> Result<LlmResponse> {
-    let ChatParams {
-        backend,
-        provider_name,
-        api_key,
-        model,
-        max_tokens,
-        system,
-        messages,
-        tools,
-    } = params;
-    // Convert tools to llm crate format
-    let llm_tools: Vec<LlmTool> = tools
+/// Build llm crate tool definitions from our tools.
+fn build_llm_tools(tools: &[&dyn Tool]) -> Vec<LlmTool> {
+    tools
         .iter()
         .map(|t| LlmTool {
             tool_type: "function".to_string(),
@@ -46,18 +37,24 @@ async fn chat_impl(params: ChatParams<'_>) -> Result<LlmResponse> {
                 parameters: t.schema(),
             },
         })
-        .collect();
+        .collect()
+}
 
+/// Build the llm crate client from shared parameters.
+fn build_llm_client(
+    params: &ChatParams<'_>,
+    llm_tools: &[LlmTool],
+) -> Result<Box<dyn llm::LLMProvider>> {
     // NOTE: We rebuild the LLM client on each call because the llm crate requires
     // tools to be set at build time. This is a known inefficiency for tool-heavy workloads.
     let mut builder = LLMBuilder::new()
-        .backend(backend)
-        .api_key(api_key)
-        .model(model)
-        .system(system)
-        .max_tokens(max_tokens);
+        .backend(params.backend.clone())
+        .api_key(params.api_key)
+        .model(params.model)
+        .system(params.system)
+        .max_tokens(params.max_tokens);
 
-    for tool in &llm_tools {
+    for tool in llm_tools {
         builder = builder.function(
             llm::builder::FunctionBuilder::new(&tool.function.name)
                 .description(&tool.function.description)
@@ -65,36 +62,12 @@ async fn chat_impl(params: ChatParams<'_>) -> Result<LlmResponse> {
         );
     }
 
-    let llm = builder.build().context("failed to build LLM client")?;
+    builder.build().context("failed to build LLM client")
+}
 
-    // Convert our messages to llm crate format
-    let chat_messages: Vec<ChatMessage> = messages.iter().filter_map(convert_message).collect();
-
-    // Call the LLM with timeout
-    let api_timeout = Duration::from_secs(API_TIMEOUT_SECS);
-    let timeout_msg = format!(
-        "{} API call timed out after {} seconds",
-        provider_name, API_TIMEOUT_SECS
-    );
-    let error_msg = format!("failed to call {} API", provider_name);
-
-    let response = if llm_tools.is_empty() {
-        timeout(api_timeout, llm.chat(&chat_messages))
-            .await
-            .context(timeout_msg)?
-            .context(error_msg)?
-    } else {
-        timeout(
-            api_timeout,
-            llm.chat_with_tools(&chat_messages, Some(&llm_tools)),
-        )
-        .await
-        .context(timeout_msg)?
-        .context(error_msg)?
-    };
-
-    // Extract tool calls from the native API response
-    let tool_calls: Vec<ToolCall> = response
+/// Parse tool calls from the response trait object.
+fn parse_tool_calls(response: &dyn llm::chat::ChatResponse) -> Vec<ToolCall> {
+    response
         .tool_calls()
         .map(|calls| {
             calls
@@ -106,7 +79,7 @@ async fn chat_impl(params: ChatParams<'_>) -> Result<LlmResponse> {
                             warn!(
                                 tool = %tc.function.name,
                                 error = %e,
-                                "failed to parse tool call arguments as JSON, returning error object"
+                                "failed to parse tool call arguments as JSON"
                             );
                             serde_json::json!({
                                 "error": format!("Failed to parse arguments: {}", e)
@@ -121,15 +94,119 @@ async fn chat_impl(params: ChatParams<'_>) -> Result<LlmResponse> {
                 })
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// Shared non-streaming implementation for LLM providers backed by the `llm` crate.
+async fn chat_impl(params: ChatParams<'_>) -> Result<LlmResponse> {
+    let llm_tools = build_llm_tools(params.tools);
+    let llm = build_llm_client(&params, &llm_tools)?;
+    let chat_messages: Vec<ChatMessage> =
+        params.messages.iter().filter_map(convert_message).collect();
+
+    let api_timeout = Duration::from_secs(API_TIMEOUT_SECS);
+    let timeout_msg = format!(
+        "{} API call timed out after {} seconds",
+        params.provider_name, API_TIMEOUT_SECS
+    );
+    let error_msg = format!("failed to call {} API", params.provider_name);
+
+    let response: Box<dyn llm::chat::ChatResponse> = if llm_tools.is_empty() {
+        timeout(api_timeout, llm.chat(&chat_messages))
+            .await
+            .context(timeout_msg)?
+            .context(error_msg)?
+    } else {
+        timeout(
+            api_timeout,
+            llm.chat_with_tools(&chat_messages, Some(&llm_tools)),
+        )
+        .await
+        .context(timeout_msg)?
+        .context(error_msg)?
+    };
+
+    let tool_calls = parse_tool_calls(response.as_ref());
 
     let content = response.text().unwrap_or_else(|| {
         // Only warn if there are no tool calls — empty content is normal for tool-use responses
         if tool_calls.is_empty() {
-            warn!("{} API returned empty response text", provider_name);
+            warn!("{} API returned empty response text", params.provider_name);
         }
         String::new()
     });
+
+    Ok(LlmResponse {
+        message: Message::assistant(content),
+        tool_calls,
+    })
+}
+
+/// Shared streaming implementation for LLM providers backed by the `llm` crate.
+async fn chat_stream_impl(
+    params: ChatParams<'_>,
+    token_sender: mpsc::Sender<String>,
+) -> Result<LlmResponse> {
+    let llm_tools = build_llm_tools(params.tools);
+    let llm = build_llm_client(&params, &llm_tools)?;
+    let chat_messages: Vec<ChatMessage> =
+        params.messages.iter().filter_map(convert_message).collect();
+
+    let api_timeout = Duration::from_secs(API_TIMEOUT_SECS);
+    let timeout_msg = format!(
+        "{} streaming API call timed out after {} seconds",
+        params.provider_name, API_TIMEOUT_SECS
+    );
+    let stream_err_msg = format!("failed to start {} streaming", params.provider_name);
+
+    let mut stream = timeout(
+        api_timeout,
+        llm.chat_stream_with_tools(&chat_messages, Some(&llm_tools)),
+    )
+    .await
+    .context(timeout_msg)?
+    .context(stream_err_msg)?;
+
+    let mut content = String::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(StreamChunk::Text(text)) => {
+                content.push_str(&text);
+                // Best-effort send — drop if the receiver is full or closed
+                let _ = token_sender.try_send(text);
+            }
+            Ok(StreamChunk::ToolUseComplete { tool_call, .. }) => {
+                let arguments = match serde_json::from_str(&tool_call.function.arguments) {
+                    Ok(args) => args,
+                    Err(e) => {
+                        warn!(
+                            tool = %tool_call.function.name,
+                            error = %e,
+                            "failed to parse streamed tool call arguments"
+                        );
+                        serde_json::json!({
+                            "error": format!("Failed to parse arguments: {}", e)
+                        })
+                    }
+                };
+                tool_calls.push(ToolCall {
+                    id: tool_call.id,
+                    name: tool_call.function.name,
+                    arguments,
+                });
+            }
+            Ok(StreamChunk::Done { .. }) => break,
+            Ok(_) => {
+                // ToolUseStart, ToolUseInputDelta — intermediate events, skip
+            }
+            Err(e) => {
+                warn!(error = %e, "stream chunk error");
+                anyhow::bail!("streaming error: {}", e);
+            }
+        }
+    }
 
     Ok(LlmResponse {
         message: Message::assistant(content),
@@ -218,21 +295,14 @@ impl AnthropicProvider {
     pub fn haiku() -> Result<Self> {
         Self::new("claude-3-5-haiku-20241022")
     }
-}
 
-#[async_trait]
-impl LlmProvider for AnthropicProvider {
-    fn name(&self) -> &str {
-        "anthropic"
-    }
-
-    async fn chat(
-        &self,
-        system: &str,
-        messages: &[Message],
-        tools: &[&dyn Tool],
-    ) -> Result<LlmResponse> {
-        chat_impl(ChatParams {
+    fn chat_params<'a>(
+        &'a self,
+        system: &'a str,
+        messages: &'a [Message],
+        tools: &'a [&'a dyn Tool],
+    ) -> ChatParams<'a> {
+        ChatParams {
             backend: LLMBackend::Anthropic,
             provider_name: "Anthropic",
             api_key: &self.api_key,
@@ -241,8 +311,37 @@ impl LlmProvider for AnthropicProvider {
             system,
             messages,
             tools,
-        })
-        .await
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for AnthropicProvider {
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[&dyn Tool],
+    ) -> Result<LlmResponse> {
+        chat_impl(self.chat_params(system, messages, tools)).await
+    }
+
+    async fn chat_stream(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[&dyn Tool],
+        token_sender: mpsc::Sender<String>,
+    ) -> Result<LlmResponse> {
+        chat_stream_impl(self.chat_params(system, messages, tools), token_sender).await
     }
 }
 
@@ -274,21 +373,14 @@ impl OpenAIProvider {
     pub fn gpt4o_mini() -> Result<Self> {
         Self::new("gpt-4o-mini")
     }
-}
 
-#[async_trait]
-impl LlmProvider for OpenAIProvider {
-    fn name(&self) -> &str {
-        "openai"
-    }
-
-    async fn chat(
-        &self,
-        system: &str,
-        messages: &[Message],
-        tools: &[&dyn Tool],
-    ) -> Result<LlmResponse> {
-        chat_impl(ChatParams {
+    fn chat_params<'a>(
+        &'a self,
+        system: &'a str,
+        messages: &'a [Message],
+        tools: &'a [&'a dyn Tool],
+    ) -> ChatParams<'a> {
+        ChatParams {
             backend: LLMBackend::OpenAI,
             provider_name: "OpenAI",
             api_key: &self.api_key,
@@ -297,7 +389,36 @@ impl LlmProvider for OpenAIProvider {
             system,
             messages,
             tools,
-        })
-        .await
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for OpenAIProvider {
+    fn name(&self) -> &str {
+        "openai"
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[&dyn Tool],
+    ) -> Result<LlmResponse> {
+        chat_impl(self.chat_params(system, messages, tools)).await
+    }
+
+    async fn chat_stream(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[&dyn Tool],
+        token_sender: mpsc::Sender<String>,
+    ) -> Result<LlmResponse> {
+        chat_stream_impl(self.chat_params(system, messages, tools), token_sender).await
     }
 }
