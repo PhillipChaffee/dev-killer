@@ -40,7 +40,7 @@ pub async fn agent_loop(
     for iteration in 0..max_iterations {
         debug!(agent = agent_name, iteration, "agent iteration");
 
-        events.emit(Event::IterationCompleted {
+        events.emit(Event::IterationStarted {
             agent_name: agent_name.to_string(),
             iteration,
             max_iterations,

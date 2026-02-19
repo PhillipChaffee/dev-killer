@@ -3,7 +3,9 @@ use clap::{Parser, Subcommand};
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
-use dev_killer::{DevKiller, ProjectConfig, SessionStatus, SqliteStorage, Storage};
+use dev_killer::{
+    DevKiller, PortableSession, ProjectConfig, SessionStatus, SqliteStorage, Storage,
+};
 
 #[derive(Parser)]
 #[command(name = "dev-killer", version)]
@@ -83,6 +85,12 @@ enum Commands {
         #[arg(long)]
         working_dir: Option<String>,
     },
+
+    /// Respond with HELLO
+    Hello,
+
+    /// Respond with PIPELINE
+    Pipeline,
 }
 
 fn init_logging(verbose: bool) {
@@ -231,18 +239,16 @@ async fn main() -> Result<()> {
         }
 
         Commands::ExportSession { session_id, output } => {
-            let dk = DevKiller::builder()
-                .anthropic(None)
-                .unwrap_or_else(|_| DevKiller::builder())
-                .sqlite_storage()
-                .context("failed to initialize session storage")?
-                .build()
-                .context("failed to build DevKiller")?;
+            let storage = SqliteStorage::default_location()
+                .context("failed to initialize session storage")?;
 
-            let portable = dk
-                .export_session(&session_id)
-                .await
-                .context("failed to export session")?;
+            let session = storage
+                .load(&session_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
+
+            info!(session_id = %session_id, "exporting session");
+            let portable = PortableSession::from_session(&session);
 
             let output_path = output.unwrap_or_else(|| format!("{}.json", session_id));
             let json =
@@ -255,26 +261,34 @@ async fn main() -> Result<()> {
         }
 
         Commands::ImportSession { file, working_dir } => {
-            let dk = DevKiller::builder()
-                .anthropic(None)
-                .unwrap_or_else(|_| DevKiller::builder())
-                .sqlite_storage()
-                .context("failed to initialize session storage")?
-                .build()
-                .context("failed to build DevKiller")?;
+            let storage = SqliteStorage::default_location()
+                .context("failed to initialize session storage")?;
 
             let json = std::fs::read_to_string(&file)
                 .with_context(|| format!("failed to read {}", file))?;
 
-            let portable: dev_killer::PortableSession =
+            let portable: PortableSession =
                 serde_json::from_str(&json).context("failed to parse session JSON")?;
 
-            let new_id = dk
-                .import_session(portable, working_dir)
-                .await
-                .context("failed to import session")?;
+            let original_id = portable.original_id.clone();
+            let session = portable.into_session(working_dir);
+            let new_id = session.id.clone();
 
+            storage
+                .save(&session)
+                .await
+                .context("failed to save imported session")?;
+
+            info!(new_id = %new_id, original_id = %original_id, "imported session");
             println!("Imported session as {} (ready to resume)", new_id);
+        }
+
+        Commands::Hello => {
+            println!("HELLO");
+        }
+
+        Commands::Pipeline => {
+            println!("PIPELINE");
         }
     }
 

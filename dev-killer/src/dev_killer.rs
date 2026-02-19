@@ -218,6 +218,7 @@ impl DevKiller {
         working_dir: Option<String>,
     ) -> Result<String, DevKillerError> {
         let storage = self.require_storage()?;
+        let original_id = portable.original_id.clone();
         let session = portable.into_session(working_dir);
         let new_id = session.id.clone();
 
@@ -227,7 +228,7 @@ impl DevKiller {
 
         info!(
             new_id = %new_id,
-            original_id = %session.id,
+            original_id = %original_id,
             "imported session"
         );
         Ok(new_id)

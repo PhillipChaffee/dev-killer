@@ -204,8 +204,7 @@ impl DevKillerBuilder {
         } else if self.use_default_tools {
             ToolRegistry::with_default_tools(&self.policy)
         } else {
-            // Default to standard tools if nothing was explicitly set
-            ToolRegistry::with_default_tools(&self.policy)
+            ToolRegistry::new()
         };
 
         let pipeline = self.pipeline.unwrap_or_default();

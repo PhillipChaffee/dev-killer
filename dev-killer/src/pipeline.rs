@@ -178,6 +178,10 @@ pub async fn execute_pipeline(
     tools: &ToolRegistry,
     events: &EventSender,
 ) -> Result<String> {
+    if pipeline.steps.is_empty() {
+        anyhow::bail!("pipeline has no steps");
+    }
+
     info!(task, "pipeline starting");
 
     let mut context = PipelineContext {
@@ -248,10 +252,13 @@ pub async fn execute_pipeline(
     }
 
     // No review step — just return the last step's output
-    let last_step_name = &pipeline.steps[steps_before_review - 1].name;
+    let last_step = pipeline
+        .steps
+        .last()
+        .expect("pipeline steps non-empty (checked above)");
     Ok(context
         .step_outputs
-        .get(last_step_name)
+        .get(&last_step.name)
         .cloned()
         .unwrap_or_default())
 }
@@ -316,8 +323,8 @@ fn is_review_approved(review: &str) -> bool {
             return false;
         }
     }
-    let lower = review.to_lowercase();
-    lower.contains("approved") && !lower.contains("needs_work")
+    // No explicit verdict found — default to not approved
+    false
 }
 
 fn format_success_output(context: &PipelineContext) -> String {
@@ -326,8 +333,12 @@ fn format_success_output(context: &PipelineContext) -> String {
         context.original_task
     );
 
-    for (name, content) in &context.step_outputs {
-        output.push_str(&format!("\n\n## {}\n{}", capitalize(name), content));
+    let mut names: Vec<&String> = context.step_outputs.keys().collect();
+    names.sort();
+    for name in names {
+        if let Some(content) = context.step_outputs.get(name) {
+            output.push_str(&format!("\n\n## {}\n{}", capitalize(name), content));
+        }
     }
 
     output.push_str("\n\n---\nStatus: SUCCESS");
@@ -346,7 +357,12 @@ fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        // Find a valid UTF-8 boundary at or before max_len to avoid panics on multi-byte chars
+        let mut boundary = max_len;
+        while boundary > 0 && !s.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        format!("{}...", &s[..boundary])
     }
 }
 

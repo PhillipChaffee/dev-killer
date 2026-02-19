@@ -57,8 +57,8 @@ pub enum Event {
     ToolStarted { tool_name: String },
     /// A tool finished executing
     ToolCompleted { tool_name: String, is_error: bool },
-    /// An agent loop iteration completed
-    IterationCompleted {
+    /// An agent loop iteration started
+    IterationStarted {
         agent_name: String,
         iteration: usize,
         max_iterations: usize,
