@@ -15,7 +15,9 @@ pub use llm::{
     ToolResult,
 };
 pub use runtime::Executor;
-pub use session::{SessionState, Storage};
+pub use session::{
+    SessionPhase, SessionState, SessionStatus, SessionSummary, SqliteStorage, Storage,
+};
 pub use tools::{
     EditFileTool, GlobTool, GrepTool, ReadFileTool, ShellTool, Tool, ToolRegistry, WriteFileTool,
 };

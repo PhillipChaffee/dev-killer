@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use super::SessionState;
+use super::sqlite::SessionSummary;
 
 /// Storage backend for sessions
 #[async_trait]
@@ -12,8 +13,8 @@ pub trait Storage: Send + Sync {
     /// Load a session by ID
     async fn load(&self, id: &str) -> Result<Option<SessionState>>;
 
-    /// List all sessions
-    async fn list(&self) -> Result<Vec<String>>;
+    /// List all sessions (returns summaries, not full data)
+    async fn list(&self) -> Result<Vec<SessionSummary>>;
 
     /// Delete a session
     async fn delete(&self, id: &str) -> Result<()>;

@@ -5,7 +5,8 @@ use tracing_subscriber::EnvFilter;
 
 use dev_killer::{
     AnthropicProvider, CoderAgent, EditFileTool, Executor, GlobTool, GrepTool, LlmProvider,
-    OpenAIProvider, OrchestratorAgent, ReadFileTool, ShellTool, ToolRegistry, WriteFileTool,
+    OpenAIProvider, OrchestratorAgent, ReadFileTool, SessionState, ShellTool, SqliteStorage,
+    Storage, ToolRegistry, WriteFileTool,
 };
 
 #[derive(Parser)]
@@ -38,6 +39,33 @@ enum Commands {
         /// Use simple mode (single coder agent) instead of full orchestration
         #[arg(long)]
         simple: bool,
+
+        /// Save session for later resume (enables persistence)
+        #[arg(long)]
+        save_session: bool,
+    },
+
+    /// Resume a previously interrupted session
+    Resume {
+        /// Session ID to resume
+        session_id: String,
+
+        /// Use simple mode (single coder agent)
+        #[arg(long)]
+        simple: bool,
+    },
+
+    /// List saved sessions
+    Sessions {
+        /// Show only sessions with this status (pending, in_progress, completed, failed, interrupted)
+        #[arg(long)]
+        status: Option<String>,
+    },
+
+    /// Delete a session
+    DeleteSession {
+        /// Session ID to delete
+        session_id: String,
     },
 }
 
@@ -93,23 +121,58 @@ async fn main() -> Result<()> {
     init_logging(cli.verbose);
 
     match cli.command {
-        Commands::Run { task, simple } => {
-            info!(provider = %cli.provider, simple, "starting task");
+        Commands::Run {
+            task,
+            simple,
+            save_session,
+        } => {
+            info!(provider = %cli.provider, simple, save_session, "starting task");
 
             let provider = create_provider(&cli.provider, cli.model.as_deref())
                 .context("failed to create LLM provider")?;
 
             let tools = create_tool_registry();
-            let executor = Executor::new(tools);
 
-            let result = if simple {
-                info!("using simple mode (single coder agent)");
-                let agent = CoderAgent::new();
-                executor.run(&agent, &task, provider.as_ref()).await
+            let result = if save_session {
+                // Run with session tracking
+                let storage = SqliteStorage::default_location()
+                    .context("failed to initialize session storage")?;
+                let executor = Executor::with_storage(tools, Box::new(storage));
+
+                let working_dir = std::env::current_dir()
+                    .context("failed to get current directory")?
+                    .to_string_lossy()
+                    .to_string();
+
+                let mut session = SessionState::new(&task, working_dir);
+                info!(session_id = %session.id, "created new session");
+
+                if simple {
+                    info!("using simple mode (single coder agent)");
+                    let agent = CoderAgent::new();
+                    executor
+                        .run_with_session(&agent, &mut session, provider.as_ref())
+                        .await
+                } else {
+                    info!("using orchestrator mode (planner -> coder -> tester -> reviewer)");
+                    let agent = OrchestratorAgent::new();
+                    executor
+                        .run_with_session(&agent, &mut session, provider.as_ref())
+                        .await
+                }
             } else {
-                info!("using orchestrator mode (planner -> coder -> tester -> reviewer)");
-                let agent = OrchestratorAgent::new();
-                executor.run(&agent, &task, provider.as_ref()).await
+                // Run without session tracking
+                let executor = Executor::new(tools);
+
+                if simple {
+                    info!("using simple mode (single coder agent)");
+                    let agent = CoderAgent::new();
+                    executor.run(&agent, &task, provider.as_ref()).await
+                } else {
+                    info!("using orchestrator mode (planner -> coder -> tester -> reviewer)");
+                    let agent = OrchestratorAgent::new();
+                    executor.run(&agent, &task, provider.as_ref()).await
+                }
             };
 
             match result {
@@ -121,6 +184,74 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+
+        Commands::Resume { session_id, simple } => {
+            info!(session_id = %session_id, "resuming session");
+
+            let provider = create_provider(&cli.provider, cli.model.as_deref())
+                .context("failed to create LLM provider")?;
+
+            let tools = create_tool_registry();
+            let storage = SqliteStorage::default_location()
+                .context("failed to initialize session storage")?;
+            let executor = Executor::with_storage(tools, Box::new(storage));
+
+            let result = if simple {
+                let agent = CoderAgent::new();
+                executor
+                    .resume_session(&session_id, &agent, provider.as_ref())
+                    .await
+            } else {
+                let agent = OrchestratorAgent::new();
+                executor
+                    .resume_session(&session_id, &agent, provider.as_ref())
+                    .await
+            };
+
+            match result {
+                Ok(output) => {
+                    println!("\n{}", output);
+                }
+                Err(e) => {
+                    error!(error = %e, "resume failed");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Sessions { status } => {
+            let storage = SqliteStorage::default_location()
+                .context("failed to initialize session storage")?;
+
+            let sessions = storage.list().await?;
+
+            if sessions.is_empty() {
+                println!("No sessions found.");
+                return Ok(());
+            }
+
+            println!("{:<10} {:<12} {:<12} TASK", "ID", "STATUS", "PHASE");
+            println!("{}", "-".repeat(70));
+
+            for session in sessions {
+                // Filter by status if specified
+                if let Some(ref filter_status) = status {
+                    if session.status != *filter_status {
+                        continue;
+                    }
+                }
+
+                println!("{}", session);
+            }
+        }
+
+        Commands::DeleteSession { session_id } => {
+            let storage = SqliteStorage::default_location()
+                .context("failed to initialize session storage")?;
+
+            storage.delete(&session_id).await?;
+            println!("Deleted session: {}", session_id);
         }
     }
 
