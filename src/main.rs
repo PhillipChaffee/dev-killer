@@ -10,7 +10,7 @@ use dev_killer::{
 };
 
 #[derive(Parser)]
-#[command(name = "dev-killer")]
+#[command(name = "dev-killer", version)]
 #[command(about = "An autonomous coding agent platform", long_about = None)]
 #[command(version)]
 struct Cli {
