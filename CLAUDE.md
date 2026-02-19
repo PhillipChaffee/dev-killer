@@ -133,6 +133,87 @@ impl Agent for YourAgent {
 - Test async code with `#[tokio::test]`
 - Use descriptive test names: `test_<function>_<scenario>_<expected>`
 
+## Smoke Tests
+
+End-to-end verification tests organized by implementation phase. After making changes to the codebase, re-run the smoke tests for any phase whose functionality you touched to make sure existing behavior still works. For example, if you modify the shell tool, re-run the Phase 2 tests. If you change the LLM provider layer, re-run Phase 1 and Phase 5 tests. When in doubt, run all of them.
+
+When adding new features, add corresponding smoke tests here. When modifying existing behavior, update any affected smoke tests to match the new expected behavior. Keep each phase between 1 and 5 tests.
+
+All require a `cargo build` first. Tests marked with (API key) require `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` set.
+
+### Phase 1: Core Infrastructure (LLM + File Tools + Basic Agent)
+
+1. Basic LLM round-trip (API key):
+   ```bash
+   cargo run -- run --simple "respond with only the word HELLO"
+   ```
+2. Agent can read files (API key):
+   ```bash
+   cargo run -- run --simple "read the file src/lib.rs and tell me the first function name you see"
+   ```
+3. Agent can write and read files together (API key):
+   ```bash
+   cargo run -- run --simple "write a file called /tmp/dev-killer-test.txt containing 'smoke test passed' then read it back and tell me what it says"
+   ```
+
+### Phase 2: Tool Expansion & Shell (Shell + Search + Policy)
+
+1. Shell tool executes commands (API key):
+   ```bash
+   cargo run -- run --simple "run the command 'echo hello world' using the shell tool and tell me the output"
+   ```
+2. Glob search works (API key):
+   ```bash
+   cargo run -- run --simple "use the glob tool to find all .rs files in the src/ directory and count them"
+   ```
+3. Grep search works (API key):
+   ```bash
+   cargo run -- run --simple "use the grep tool to search for 'fn main' in src/main.rs and show me the match"
+   ```
+4. Policy blocks dangerous commands (API key):
+   ```bash
+   cargo run -- run --simple "run the command 'sudo rm -rf /' and tell me what happened"
+   ```
+
+### Phase 3: Multi-Agent Orchestration (Orchestrator Pipeline)
+
+1. Full orchestrator pipeline - plan, code, test, review (API key):
+   ```bash
+   cargo run -- run "read src/lib.rs and summarize what it does"
+   ```
+2. Agent can edit files in a multi-step task (API key):
+   ```bash
+   cargo run -- run --simple "edit src/lib.rs to add a comment '// smoke test' at the top of the file, then read it to confirm the comment is there"
+   ```
+
+### Phase 4: Persistence & Sessions (SQLite + Resume)
+
+1. Session is created and listed (API key):
+   ```bash
+   cargo run -- run --save-session --simple "respond with only the word HELLO"
+   cargo run -- sessions
+   ```
+2. Session filtering by status works:
+   ```bash
+   cargo run -- sessions --status completed
+   ```
+3. Session deletion works:
+   ```bash
+   cargo run -- delete-session <session-id>
+   cargo run -- sessions
+   ```
+
+### Phase 5: Multi-Provider & Polish (OpenAI + Config + Logging)
+
+1. OpenAI provider works end-to-end (OPENAI_API_KEY):
+   ```bash
+   cargo run -- --provider openai run --simple "respond with only the word HELLO"
+   ```
+2. Verbose logging produces debug output (API key):
+   ```bash
+   cargo run -- -v run --simple "respond with only the word HELLO"
+   ```
+
 ## Debugging
 
 ```bash
